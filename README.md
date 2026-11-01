@@ -1,227 +1,191 @@
 # OpenSpec verification loop for OpenCode
 
-An installable skill and `/verify-loop` command that runs a fresh verifier, sends
-the complete report to a fresh fixer, and repeats full verification until every
-critical issue, warning, suggestion, and applicable unverified check is resolved.
+A native OpenCode plugin that verifies an OpenSpec change, sends every finding to
+an independent fixer, and repeats full verification until the change is clean.
+Every verification and fix uses a fresh session, sequentially in the same checkout.
 
-The TypeScript controller owns the loop. Reports, worker identities, independent
-check evidence, and recovery state are saved outside the consuming checkout.
+## Install
 
-## Requirements
-
-- OpenCode **2.2.5**, configured with an available model.
-- OpenSpec **1.16.0**, with `openspec-verify-change` installed in the consuming project.
-- Node.js **22.18 or later** and Git.
-- A repo-local active OpenSpec change. Stores and multi-repository changes are
-  detected and unsupported in this release.
-
-These versions are deliberately pinned while the OpenCode API evolves. Model
-selection is configurable and defaults to the consuming project's OpenCode
-configuration. No provider or model is hardcoded by the skill.
-
-## Install into a project
-
-From the consuming project, install from a local copy of this repository:
+Install globally from GitHub:
 
 ```sh
-npx skills add /absolute/path/to/openspec-verify-loop --skill openspec-verify-loop -a opencode
+opencode plugin add github:dimiboi/openspec-verify-loop
 ```
 
-The repository includes the generated runtime bundle, so the consumer does not
-need TypeScript, Bun, a build step, or npm dependencies. Both copied installations
-and skill-installer symlinks are supported. The source repository is not yet
-published; after publication the local source argument can be replaced with its
-Git URL.
+Or add the plugin to a project's `opencode.jsonc`:
 
-Then install the command and worker profiles:
-
-```sh
-node .agents/skills/openspec-verify-loop/scripts/controller.mjs setup --project .
-opencode reload
+```jsonc
+{
+  "plugins": ["github:dimiboi/openspec-verify-loop"]
+}
 ```
 
-The current Skills CLI uses `.agents/skills`, which OpenCode discovers. If your
-installer uses a different path, run `scripts/controller.mjs` from the
-actual installed skill directory. Setup creates these project files:
+Use a release tag or complete commit hash to pin a revision. OpenCode installs and
+loads the package and registers its commands, tool, and bundled skill. Consumers
+need no setup command, generated agent files, or manual build.
 
-```text
-.opencode/commands/verify-loop.md
-.opencode/agents/openspec-loop-verifier.md
-.opencode/agents/openspec-loop-fixer.md
-```
+Requirements: **OpenCode 2.2.5**, **OpenSpec 1.16.0**, Git, an available OpenCode
+model, and the project's actual `openspec-verify-change` skill. Enable OpenSpec's
+verify workflow with `openspec config profile` and refresh project tool files with
+`openspec update` if that skill is missing. The plugin reports missing prerequisites
+without modifying OpenSpec or model configuration.
 
-Setup is repeatable. It updates untouched generated files and refuses to
-overwrite customized files, returning the existing and proposed contents for
-review. `setup --replace` explicitly replaces those reviewed files. It leaves
-your OpenCode model/provider configuration alone. Removing the skill with a
-skill installer does not remove these three generated project files; remove
-them separately if you no longer want the command/profiles.
-
-If the project lacks the verification skill, enable OpenSpec's expanded verify
-workflow using `openspec config profile`, then refresh that project's tool files
-with `openspec update`. The loop reports a missing prerequisite rather than
-changing your OpenSpec configuration automatically.
+Changes must belong to an OpenSpec root at the Git checkout root. Stores, nested
+subproject roots, and multi-repository changes are unsupported.
 
 ## Use
-
-Inside OpenCode:
 
 ```text
 /verify-loop
 /verify-loop add-export
+/verify-loop-status
+/verify-loop-status <run-id>
+/verify-loop-resume <run-id>
+/verify-loop-stop <run-id>
 ```
 
-An explicit name wins. Otherwise the launcher validates a change identified in
-the conversation, or the controller selects the only active change. Multiple
-active changes require a choice; no active changes start no worker.
+Start without a name when exactly one change is active. With several changes,
+choose one of the returned names. No active change starts no workers. Status
+without a run ID lists this checkout's runs.
 
-The launcher runs the controller in the background and reports its run ID and
-state directory. Workers run sequentially in the same checkout. A dirty tree is
-allowed; unrelated tracked and untracked work must be preserved.
+You can also invoke the bundled `openspec-verify-loop` skill in conversation. It
+uses the `openspec_verify_loop` tool with `run`, `status`, `resume`, or `stop` and
+optional `change`/`runId` arguments. Commands and the tool use the same controller.
 
-Clean requires a **fresh full verification**, zero findings at every severity,
-evidence for all prior resolutions, no applicable incomplete/failed checks, and
-passing independently executed required checks. An agent exit code or a fixer's
-claim of completion is insufficient. Justified not-applicable checks are allowed.
+Start and resume return a durable run ID and report location while the OpenCode
+server owns the ongoing work. Native command results and final outcomes are
+reported through session notices. Reporting turns have their tools removed and
+only summarize the saved result. Ordinary user turns keep their tools. Closing a
+client does not cancel server-owned work. Plugin unload/reload interrupts owned
+work; explicitly resume after reload if needed.
 
-There is no default round cap. Two consecutive fix cycles without demonstrable
-progress stop the run. Optional explicit time/round limits also stop
-unsuccessfully. The workflow does not commit, archive, push, merge, or deploy.
+A dirty tree is allowed. Workers preserve unrelated work. The plugin does not
+commit, archive, sync specs, push, merge, or deploy.
 
-## Configure models and checks
+## Completion and permissions
 
-Create `.opencode/openspec-verify-loop.json` in the consuming project:
+Clean requires a fresh complete verifier with zero critical findings, warnings,
+suggestions, or applicable unverified checks. Every prior finding needs an
+explicit resolution with evidence. Independent OpenSpec validation and configured
+checks must pass against the reviewed workspace. A fixer's completion claim cannot
+make the run clean. Justified not-applicable checks are allowed.
 
-```json
+The built-in `build` agent runs both roles with per-session policies. Verifiers
+cannot use edit tools; shell commands require approval except for narrow inspection
+rules. Shell permissions are not a filesystem sandbox. Unexpected source changes
+during verification or a worker commit invalidate the result. Fixers retain the
+project's editing/shell rules. Both roles are prevented from delegating or invoking
+the loop management interface.
+
+A worker permission request or question saves `awaiting_input` and retains the
+checkout reservation. Open its reported worker session, answer the request, then
+run `/verify-loop-resume <run-id>`. The plugin never approves requests for you.
+A stop can return `stopping` while reconciliation finishes; inspect status before
+starting another run.
+
+No default round limit applies. Explicit time/round limits, blockers, failed
+execution, malformed reports, and two consecutive fixes without workspace progress
+stop unsuccessfully. Time limits include downtime.
+
+## Configure
+
+Set options in the native plugin entry:
+
+```jsonc
 {
-  "verifierModel": "provider/model",
-  "fixerModel": "provider/model",
-  "checks": [
-    { "id": "tests", "command": ["npm", "test"], "timeoutMs": 300000 },
-    { "id": "types", "command": ["npm", "run", "typecheck"] }
+  "plugins": [
+    {
+      "package": "github:dimiboi/openspec-verify-loop",
+      "options": {
+        "verifierModel": "provider/model",
+        "fixerModel": "provider/model#variant",
+        "checks": [
+          { "id": "tests", "command": ["npm", "test"], "timeoutMs": 300000 },
+          { "id": "types", "command": ["npm", "run", "typecheck"] }
+        ]
+      }
+    }
   ]
 }
 ```
 
-Omit model fields to use the worker profiles' configured models or the OpenCode
-default. `provider/model#variant` selects a variant. Missing or disabled models
-are prerequisite failures; there is no silent substitution.
+All options are optional. Model precedence is role option, initiating session's
+selected model, the build profile's model, then the project's OpenCode default.
+Selections and variants are pinned for the run; changing the chat's selected
+model does not change existing workers. Unavailable models fail without substitution.
 
-Check commands are argument arrays, executed directly without a shell by the
-controller before each verifier. Check `cwd` defaults to the project root and
-must remain inside it. Outputs and exit codes are saved as evidence. Generated
-check outputs should be Git-ignored: a check that modifies source/unignored files
-stops verification. OpenSpec strict validation and apply/task evidence are always
-collected independently.
+Check commands are argument arrays executed without a shell before each verifier.
+`cwd` defaults to the consuming checkout and must remain inside it; `timeoutMs`
+defaults to 120000. Exit codes and output are saved. Ignore generated outputs:
+checks that modify source or unignored files stop verification. Strict OpenSpec
+validation and task/apply evidence are collected independently on every round.
 
-Optional settings: `skill` (explicit advertised verification `SKILL.md`), `server`
-(explicit OpenCode endpoint), `stateDir`, `maxRounds`, and `maxMinutes`.
-Configuration precedence is CLI options, project configuration, then defaults.
-The controller uses an existing compatible local service or starts one through
-the OpenCode client; it never stops the shared service at exit. For an explicit
-authenticated endpoint, use `OPENCODE_TOKEN`, not credentials in the URL.
+Additional options:
 
-The project `.opencode/skills/openspec-verify-change/SKILL.md` takes precedence;
-otherwise the controller resolves the advertised verification skill. The
-procedure and its resource directory are pinned for the run.
+| Option | Meaning |
+| --- | --- |
+| `skill` | Path to an advertised verification `SKILL.md` when discovery is ambiguous |
+| `stateDir` | Report/state directory outside the checkout and installed plugin |
+| `maxRounds` | Positive verification-round limit |
+| `maxMinutes` | Positive wall-time limit, including downtime |
+| `server` | Hosting OpenCode HTTP endpoint for a non-registered service |
 
-## Status, permission requests, resume, and stop
+Relative paths resolve against the invoking session's Git checkout. The plugin
+normally discovers the existing local OpenCode service. It verifies that the
+recovery endpoint belongs to the hosting process and has the same initiating
+session; it never starts, replaces, or stops an OpenCode service. For an explicit
+authenticated endpoint, provide `OPENCODE_TOKEN` in the server environment;
+credentials, query strings, and fragments are rejected in endpoint URLs.
 
-The controller emits JSON lines. The first `started` event includes `runId` and
-`runDir`; worker events include OpenCode session IDs. Saved artifacts include:
+## Reports and recovery
+
+State uses the platform user state directory under `openspec-verify-loop`, honoring
+`XDG_STATE_HOME` or the `stateDir` option. Files are keyed by canonical checkout
+and run ID under `runs/<checkout-key>/<run-id>/`:
 
 ```text
 state.json
 events.jsonl
-rounds/001/verifier.raw.json
 rounds/001/checks.json
+rounds/001/verifier.raw.json
 rounds/001/verifier.json
 rounds/001/verifier.md
+rounds/001/fixer.raw.json
 rounds/001/fixer.json
 rounds/001/fixer.md
 final.json
 final.md
 ```
 
-By default, state uses the platform user state directory under
-`openspec-verify-loop`, keyed by canonical checkout path. `XDG_STATE_HOME` is
-respected. `--state-dir` selects another location outside the checkout and skill.
-Checkout reservations use the common user state directory even when report
-storage is overridden, preventing two loops from editing the same checkout.
+A shared checkout reservation prevents overlapping loops even when report locations
+differ. Resume reconciles saved worker/input identities rather than replaying
+possibly delivered prompts. OpenCode 2.2.5 can restart execution for a duplicate
+input ID, so uncertain admission with no visible saved input stays blocked and
+reserved. Unconfirmed worker termination also retains the reservation. Do not
+delete a reservation to bypass a potentially active worker.
 
-```sh
-node <skill>/scripts/controller.mjs status --project . --run <run-id>
-node <skill>/scripts/controller.mjs resume --project . --run <run-id>
-node <skill>/scripts/controller.mjs stop --project . --run <run-id>
-```
+Changes to the target, requirements, verification procedure/resources, worker
+policy, or plugin configuration invalidate a run. Restore its original configuration
+to resume, or stop it and start a new run after reviewing changes. A clean run
+cannot be resumed; start another verification. Loading the plugin never automatically
+adopts or resumes saved work. Reports remain outside the package after removal.
 
-Use the original options when resuming, including any CLI model/limit/storage
-overrides. Changes to requirements, the procedure/resources, profiles, target,
-or effective configuration invalidate the pinned run. Review those changes and
-start a new run. A completed clean run cannot be resumed; start another to
-verify again. An exhausted limit remains exhausted on resume.
+## Development
 
-A permission request or question saves `awaiting_input` with its exact worker
-session/request and retains the checkout reservation. Answer in that OpenCode
-worker session, then explicitly resume. No permissions are auto-approved.
-Verifier edit tools are denied; shell inspection commands have narrow rules,
-and other commands may require approval. These permissions are not a filesystem
-sandbox. Unexpected source changes during verification invalidate the result.
-
-OpenCode 2.2.5 can restart execution when re-prompted with an already delivered
-input ID. Recovery therefore reads the existing inbox/messages and **never
-re-prompts a delivered input**. If a crash/lost response makes admission uncertain
-and no input is visible, the run stops with its reservation intact rather than
-guessing. Inspect the worker, use `stop` to reconcile cancellation, and start a
-new run once termination is confirmed. If confirmation fails, retain the lock
-and diagnose the worker; do not delete the lock to bypass an active worker.
-
-Closing the launching chat does not erase saved reports. Automatic chat recovery
-after reopening is not guaranteed. Use `status` to inspect and explicit `resume`
-to continue. A stop request during a running check may wait until that check's
-configured timeout before worker reconciliation completes.
-
-| Exit | Meaning |
-| --- | --- |
-| 0 | Clean, setup complete, or successful status inspection |
-| 2 | Change selection required or no active change |
-| 3 | Blocked, awaiting user input, or stop still being reconciled |
-| 4 | Execution or report-contract failure |
-| 5 | Explicit round/time limit |
-| 130 | Interrupted |
-
-For outcome decisions, read `final.json` as well as the exit code. `status`
-returns exit 0 when inspection succeeds, regardless of the saved run's outcome.
-
-## Development and verification
+Use Node.js **>=22.18**:
 
 ```sh
 npm ci
 npm run check
 ```
 
-`check` type-checks, rebuilds the self-contained ESM bundle, runs deterministic
-tests against isolated OpenSpec projects and fake worker outcomes, and validates
-the skill resources. The development dependencies include OpenSpec 1.16.0.
-The generated bundle is included for Git skill installation; CI rejects drift.
+`check` type-checks, builds the ESM plugin, runs deterministic tests with fake host
+registries/workers and isolated local OpenSpec fixtures, and validates the exported
+package and skill resources. It makes no model calls and starts no OpenCode session.
+`dist/index.js` is committed so Git installations require no build hook. Runtime
+dependencies are external imports installed by OpenCode's package manager.
 
-Optional integration exercises require a configured OpenCode service/model:
-
-```sh
-node scripts/probe.mjs
-node_modules/.bin/tsx tests/api-spike.ts
-VERIFY_LOOP_LIVE_MODEL=provider/model npm run test:live
-```
-
-The live exercise copies the installed skill into a separate Git project with a
-deliberate greeting bug and a failing test. It requires a verifier/fixer/verifier
-cycle, fresh session IDs, and a final passing test. Reports and fixture files are
-retained in an isolated temporary directory, with its location recorded in
-`.live/latest-live.json`. The test harness simulates a user allowing only a
-predeclared set of fixture inspection/check commands, exercising explicit resume;
-unknown permissions/questions fail the exercise. The API spike uses local Flint; edit its
-model setting for a different local setup. Live tests are opt-in and do not run
-in ordinary CI.
-
-See [PLAN.md](PLAN.md) for the original implementation plan and
-[verification.md](docs/verification.md) for observed validation and limitations.
+For development, point a consuming project's plugin entry at this repository's
+absolute directory, then rebuild with `npm run build`. See
+[verification and manual testing](docs/verification.md) for the checks you can run
+in OpenCode. Real-host and model testing are separate from the automated suite.

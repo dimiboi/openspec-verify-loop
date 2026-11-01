@@ -1,13 +1,15 @@
-import { OpenCode, type OpenCodeClient, type ModelRef, type AgentInfo, type SkillInfo, type SessionMessageInfo } from '@opencode/client';
-import { Service, fallback } from '@opencode/client/service';
-import { LoopError, OPENCODE_VERSION, command, exists, errorMessage } from './util.js';
+import { OpenCode, type OpenCodeClient, type ModelRef, type AgentInfo, type SkillInfo, type SessionMessageInfo, type SessionInfo } from '@opencode/client';
+import { Service } from '@opencode/client/service';
+import type { Plugin } from '@opencode/plugin';
+import type { Permission } from './workers.js';
+import { LoopError, OPENCODE_VERSION, errorMessage, digest } from './util.js';
 
 export type Model = ModelRef;
 export type Catalog = {version: string; agents: AgentInfo[]; skills: SkillInfo[]; defaultModel?: Model;
   models: {id: string; providerID: string; enabled: boolean; variants: string[]}[]};
 export type Assignment = {
   sessionId: string; inputId: string; project: string; runId: string; round: number;
-  role: 'verifier' | 'fixer'; agent: string; model: Model; prompt: string;
+  role: 'verifier' | 'fixer'; agent: string; model: Model; permissions: Permission[]; prompt: string;
 };
 export type Observation = {status: 'running'} | {status: 'awaiting_input'; requests: unknown[]} |
   {status: 'completed'; text: string; messageId: string} | {status: 'failed' | 'interrupted'; reason: string};
@@ -33,27 +35,36 @@ export function parseModel(input: string): Model {
   return {providerID: input.slice(0, slash), id, ...(variant ? {variant} : {})};
 }
 
-export async function connect(server?: string): Promise<OpenCodeAdapter> {
+/** Bind the recovery client to this plugin's hosting server; never manage a service. */
+export async function connectToHost(ctx: Pick<Plugin.Context, 'app' | 'session'>, sessionId: string, server?: string) {
+  if (ctx.app.version !== OPENCODE_VERSION) throw new LoopError('blocked', `OpenCode ${OPENCODE_VERSION} is required`);
+  const origin = await ctx.session.get({sessionID: sessionId}, request());
+  let client: OpenCodeClient;
   if (server) {
     const url = new URL(server);
-    if (url.username || url.password || url.search || url.hash) throw new Error('Server URL must not contain credentials, query, or fragment');
-    const token = process.env.OPENCODE_TOKEN;
-    return new OpenCodeAdapter(OpenCode.make({baseUrl: server, ...(token ? {headers: {authorization: `Bearer ${token}`}} : {})}));
-  }
-  // Never deliberately replace a running service of a different version.
-  const existing = await Service.discover({version: () => true});
-  if(!existing) {
-    if(await exists(fallback())) throw new LoopError('blocked','A registered OpenCode service is unhealthy or incompatible. Start a healthy OpenCode 2.2.5 service or supply --server; the loop will not replace it.');
-    const binary=await command(['opencode','--version'],process.cwd());
-    if(binary.exitCode || ![OPENCODE_VERSION,`opencode v${OPENCODE_VERSION}`].includes(binary.stdout.trim())) {
-      throw new LoopError('blocked',`OpenCode ${OPENCODE_VERSION} is required before starting its service`);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+      throw new Error('Host endpoint must be an HTTP(S) URL without credentials, query, or fragment');
     }
+    const token = process.env.OPENCODE_TOKEN;
+    client = OpenCode.make({baseUrl: server, ...(token ? {headers: {authorization: `Bearer ${token}`}} : {})});
+  } else {
+    const endpoint = await Service.discover({version: OPENCODE_VERSION});
+    if (!endpoint) throw new LoopError('blocked', 'Cannot discover the hosting OpenCode service; set the plugin server option for a non-registered host');
+    client = OpenCode.make({baseUrl: endpoint.url, headers: Service.headers(endpoint)});
   }
-  const endpoint = existing ?? await Service.ensure({version: version=>{
-    if(version!==OPENCODE_VERSION)throw new LoopError('blocked',`OpenCode service version changed to ${version}; expected ${OPENCODE_VERSION}`);
-    return true;
-  }});
-  return new OpenCodeAdapter(OpenCode.make({baseUrl: endpoint.url, headers: Service.headers(endpoint)}));
+  await assertHostingServer(ctx.app.version, origin, client);
+  return {adapter: new OpenCodeAdapter(client), origin};
+}
+
+export async function assertHostingServer(version: string, origin: Awaited<ReturnType<Plugin.Context['session']['get']>>, client: OpenCodeClient) {
+  const [info, remote] = await Promise.all([
+    client.server.info(request()), client.session.get({sessionID: origin.id}, request()),
+  ]);
+  if (info.pid !== process.pid || info.version !== version || remote.id !== origin.id ||
+      remote.time.created !== origin.time.created || remote.location.directory !== origin.location.directory ||
+      digest(JSON.stringify(remote.metadata ?? {})) !== digest(JSON.stringify(origin.metadata ?? {}))) {
+    throw new LoopError('blocked', 'The recovery endpoint is not this plugin hosting server');
+  }
 }
 
 export class OpenCodeAdapter implements Adapter {
@@ -81,17 +92,20 @@ export class OpenCodeAdapter implements Adapter {
         session = await this.client.session.create({id: a.sessionId, agent: a.agent, model: a.model,
           location: {directory: a.project}, title: `OpenSpec ${a.role} ${a.round}: ${a.runId}`,
           metadata: {openspecVerifyLoop: a.runId, inputId: a.inputId},
-          permissions: [{action: 'subagent', resource: '*', effect: 'deny'},
-            ...(a.role === 'verifier' ? [{action: 'edit', resource: '*', effect: 'deny'} as const] : [])],
+          permissions: a.permissions,
         }, request());
       } catch (e) {
         // A lost create response is reconciled by the caller-assigned identity.
         try { session = await this.client.session.get({sessionID: a.sessionId}, request()); } catch { throw e; }
       }
     }
+    this.validateSession(a, session);
+  }
+  private validateSession(a: Assignment, session: SessionInfo) {
     if (session.agent !== a.agent || session.model?.id !== a.model.id || session.model.providerID !== a.model.providerID ||
         (session.model.variant ?? 'default') !== (a.model.variant ?? 'default') ||
-        session.metadata?.openspecVerifyLoop !== a.runId || session.location.directory !== a.project) {
+        session.metadata?.openspecVerifyLoop !== a.runId || session.metadata?.inputId !== a.inputId || session.location.directory !== a.project ||
+        digest(JSON.stringify(session.permissions)) !== digest(JSON.stringify(a.permissions))) {
       throw new Error(`Session identity/configuration mismatch: ${JSON.stringify({agent: session.agent, model: session.model,
         location: session.location, runId: session.metadata?.openspecVerifyLoop, expected: {agent: a.agent, model: a.model, project: a.project, runId: a.runId}})}`);
     }
@@ -138,6 +152,7 @@ export class OpenCodeAdapter implements Adapter {
       this.client.permission.list({sessionID: a.sessionId}, request()),
       this.client.session.form.list({sessionID: a.sessionId}, request()),
     ]);
+    this.validateSession(a, session);
     const requests: unknown[] = permissions.map(p => ({type: 'permission', id: p.id, action: p.action, resources: p.resources}));
     for (const f of forms) {
       const detail = await this.client.session.form.get({sessionID: a.sessionId, formID: f.id}, request());

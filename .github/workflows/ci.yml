@@ -14,4 +14,4 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - run: git diff --exit-code -- skills/openspec-verify-loop/scripts/controller.mjs skills/openspec-verify-loop/LICENSE skills/openspec-verify-loop/references/third-party-licenses.txt
+      - run: git diff --exit-code -- dist/index.js

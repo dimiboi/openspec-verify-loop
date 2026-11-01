@@ -1,7 +1,7 @@
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mkdir, readFile, rm } from 'node:fs/promises';
-import type { Adapter, Assignment } from './opencode.js';
+import type { Adapter, Assignment, Model } from './opencode.js';
 import { checkPins, evidenceFailures, gatherEvidence, pinTarget, selectTarget, type Evidence } from './openspec.js';
 import type { Config } from './config.js';
 import { needsRepair, parseReport, type Finding } from './reports.js';
@@ -9,7 +9,7 @@ import { atomicWrite, defaultStateRoot, ensureExternalState, newId, RunStore, ru
 import { changedFiles, delay, digest, errorMessage, LoopError, snapshot, VERSION } from './util.js';
 import { workerPrompt } from './prompts.js';
 
-export type LoopOptions = {signal?: AbortSignal; pollMs?: number; emit?: (event: unknown) => void; lockRoot?: string};
+export type LoopOptions = {signal?: AbortSignal; pollMs?: number; emit?: (event: unknown) => void; lockRoot?: string; originModel?: Model; originSessionId?: string; runtimeId?: string};
 async function persistEvidence(s: RunState, round: number, evidence?: Evidence) {
   if(evidence)await atomicWrite(join(s.runDir,'rounds',String(round).padStart(3,'0'),'checks.json'),{
     workspace:evidence.after.hash,validation:evidence.validation,apply:evidence.apply,checks:evidence.checks,
@@ -23,20 +23,23 @@ async function persistOutcome(s: RunState) {
   await atomicWrite(join(s.runDir,'final.md'),`# OpenSpec verification loop: ${s.phase}\n\n${s.reason ?? ''}\n\nChange: ${s.pins.changeName}\nRun: ${s.runId}\nReports: ${join(s.runDir,'rounds')}\n`,true);
   return final;
 }
-export async function createRun(project: string, config: Config, adapter: Adapter, change?: string, options: LoopOptions = {}) {
+export async function prepareRun(project: string, config: Config, adapter: Adapter, change?: string, options: LoopOptions = {}) {
   const target = await selectTarget(project, change);
-  const pins = await pinTarget(target, config, adapter);
+  const pins = await pinTarget(target, config, adapter, {originModel: options.originModel});
   const root = await ensureExternalState(config.stateDir ?? defaultStateRoot(), project, resolve(dirname(fileURLToPath(import.meta.url)),'..'));
   const runId = newId('run');
   const runDir = runDirectory(root, project, runId);
   const initial = await snapshot(project);
-  const state: RunState = {schemaVersion:1,controllerVersion:VERSION,runId,runDir,project,config,pins,initial,
+  const state: RunState = {schemaVersion:2,pluginVersion:VERSION,originSessionId:options.originSessionId,runId,runDir,project,config,pins,initial,
     phase:'preflight',nextRole:'verifier',round:1,createdAt:Date.now(),updatedAt:Date.now(),activeMs:0,
     prior:[],stalledCycles:0,workers:[]};
-  const store = new RunStore(state, options.lockRoot);
+  const store = new RunStore(state, options.lockRoot, options.runtimeId);
   await store.acquire();
   try { await store.save(); } catch (e) { await store.release(false); throw e; }
-  return executeLoop(store, adapter, options);
+  return store;
+}
+export async function createRun(project: string, config: Config, adapter: Adapter, change?: string, options: LoopOptions = {}) {
+  return executeLoop(await prepareRun(project, config, adapter, change, options), adapter, options);
 }
 function findingsFingerprint(findings: Finding[]) {
   // IDs and wording are model-owned; categories, affected locations, and severities are a stable comparison aid.
@@ -53,6 +56,7 @@ export async function executeLoop(store: RunStore, adapter: Adapter, options: Lo
   const emit = (event: unknown) => options.emit?.(event);
   const save = async () => { s.activeMs = previousActive + Date.now() - started; await store.save(); };
   const terminate = async (outcome: RunState['phase'], reason: string, preservePending = false) => {
+    if (preservePending && s.pending?.stage === 'admitting') reason += '; prompt admission is uncertain; checkout remains reserved';
     if (s.pending && !preservePending) {
       const confirmed = await adapter.interrupt(s.pending.assignment).catch(() => false);
       if (confirmed) {
@@ -87,7 +91,7 @@ export async function executeLoop(store: RunStore, adapter: Adapter, options: Lo
         await persistEvidence(s,s.round,evidence);
         if (Buffer.byteLength(prompt) > 2 * 1024 * 1024) throw new LoopError('blocked', 'Complete worker context exceeds 2 MiB; reduce report/context size without dropping findings');
         const assignment: Assignment = {sessionId:newId('ses'),inputId:newId('msg'),project:s.project,runId:s.runId,
-          role,round:s.round,agent:s.pins.agents[role],model:s.pins.models[role],prompt};
+          role,round:s.round,agent:s.pins.agents[role],model:s.pins.models[role],permissions:s.pins.permissions[role],prompt};
         s.pending = {assignment,stage:'prepared',before,...(evidence ? {evidence} : {})};
         s.phase = role === 'verifier' ? 'verifying' : 'fixing';
         s.workers.push({sessionId:assignment.sessionId,inputId:assignment.inputId,role,round:s.round});
@@ -194,7 +198,7 @@ export async function executeLoop(store: RunStore, adapter: Adapter, options: Lo
   return s;
 }
 
-export async function resumeRun(store: RunStore, adapter: Adapter, options: LoopOptions = {}) {
+export async function prepareResume(store: RunStore, adapter: Adapter, options: LoopOptions = {}) {
   if (store.state.phase === 'clean') {
     // A crash after persisting clean but before releasing its reservation must remain recoverable.
     await store.acquire(true);
@@ -208,10 +212,13 @@ export async function resumeRun(store: RunStore, adapter: Adapter, options: Loop
     store.state.nextRole = 'verifier';
     store.state.stalledCycles = 0;
   }
-  return executeLoop(store, adapter, options);
+  return store;
+}
+export async function resumeRun(store: RunStore, adapter: Adapter, options: LoopOptions = {}) {
+  return executeLoop(await prepareResume(store, adapter, options), adapter, options);
 }
 
-/** A dead controller is recovered under the same checkout lease before cancellation. */
+/** An inactive run is recovered under the same checkout lease before cancellation. */
 export async function stopRun(store: RunStore, adapter?: Adapter) {
   await store.acquire(true);
   try {
@@ -229,6 +236,7 @@ export async function stopRun(store: RunStore, adapter?: Adapter) {
       throw new LoopError('blocked', 'Worker termination is unconfirmed; checkout remains reserved');
     }
     delete store.state.pending;
+    delete store.state.requests;
     store.state.nextRole = 'verifier';
     store.state.phase = 'interrupted'; store.state.reason = 'Stopped by user';
     await store.save();

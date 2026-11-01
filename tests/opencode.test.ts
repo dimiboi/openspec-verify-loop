@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { OpenCodeClient, SessionMessageInfo } from '@opencode/client';
-import { OpenCodeAdapter, parseModel, type Assignment } from '../src/opencode.js';
+import type { OpenCodeClient, SessionInfo } from '@opencode/client';
+import { workerPermissions } from '../src/workers.js';
+import { OpenCodeAdapter, parseModel, assertHostingServer, type Assignment } from '../src/opencode.js';
 
 const a: Assignment={sessionId:'ses_a',inputId:'msg_a',runId:'run_a',role:'verifier',round:1,agent:'verifier',project:'/tmp/project',
-  model:{providerID:'fake',id:'test'},prompt:'verify'};
+  model:{providerID:'fake',id:'test'},permissions:workerPermissions('verifier'),prompt:'verify'};
 function adapterWith(options: {messages?:unknown[]; forms?:unknown[];permissions?:unknown[];outcome?:string;busy?:number;idle?:number;finish?:string;variant?:string}={}) {
   let submissions=0;
   const messages=options.messages ?? [
@@ -13,7 +14,7 @@ function adapterWith(options: {messages?:unknown[]; forms?:unknown[];permissions
     {type:'idle',id:'end',outcome:options.outcome ?? 'succeeded',time:{created:4}},
   ];
   const client={
-    session:{get:async()=>({outcome:options.outcome??'succeeded',time:{busy:options.busy??1,idle:options.idle??4}}),
+    session:{get:async()=>({agent:a.agent,model:a.model,location:{directory:a.project},metadata:{openspecVerifyLoop:a.runId,inputId:a.inputId},permissions:workerPermissions(a.role),outcome:options.outcome??'succeeded',time:{busy:options.busy??1,idle:options.idle??4}}),
       inbox:{list:async()=>[]},prompt:async()=>{submissions++;},
       form:{list:async()=>options.forms??[],get:async()=>({state:{status:'pending'}})}},
     message:{list:async()=>({data:messages,cursor:{}})},permission:{list:async()=>options.permissions??[]},
@@ -51,4 +52,30 @@ test('message pagination follows cursors without incompatible order parameters',
   }}} as unknown as OpenCodeClient;
   const collected=await new OpenCodeAdapter(client).messages(a.sessionId);
   assert.equal(collected.length,2);assert.equal(inputs.length,2);
+});
+test('recovery client must match the plugin process and originating native session', async () => {
+  const origin = {id: 'origin', time: {created: 1}, location: {directory: '/consumer'}, metadata: {key: 'value'}} as unknown as SessionInfo;
+  let pid = process.pid, directory = '/consumer';
+  const client = {server: {info: async () => ({version: '2.2.5', pid})},
+    session: {get: async () => ({...origin, location: {directory}})}} as unknown as OpenCodeClient;
+  await assertHostingServer('2.2.5', origin, client);
+  pid++;
+  await assert.rejects(assertHostingServer('2.2.5', origin, client), /not this plugin hosting server/);
+  pid = process.pid; directory = '/other';
+  await assert.rejects(assertHostingServer('2.2.5', origin, client), /not this plugin hosting server/);
+});
+test('worker creation persists and verifies the full per-session permission policy', async () => {
+  let stored: any, creations = 0;
+  const client = {session: {
+    get: async () => {if (!stored) throw {_tag: 'SessionNotFoundError'}; return stored;},
+    create: async (input: any) => {creations++; return stored = input;},
+  }} as unknown as OpenCodeClient;
+  const adapter = new OpenCodeAdapter(client);
+  await adapter.ensureSession(a);
+  await adapter.ensureSession(a);
+  assert.equal(creations, 1);
+  assert.deepEqual(stored.permissions, a.permissions);
+  assert.equal(stored.parentID, undefined, 'workers do not inherit a conversation');
+  stored.permissions = [...a.permissions, {action: 'edit', resource: '*', effect: 'allow'}];
+  await assert.rejects(adapter.ensureSession(a), /identity\/configuration mismatch/);
 });

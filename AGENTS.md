@@ -1,16 +1,15 @@
 # Working in this repository
 
-- Use Node.js >=22.18 and `npm ci`. Run `npm run check` for code changes; it checks types, builds, runs tests, and validates skill resources. Documentation-only edits do not need the suite.
-- Edit runtime code in `src/`. `npm run build` generates the skill's `scripts/controller.mjs`, `LICENSE`, and `references/third-party-licenses.txt`; include regenerated outputs rather than editing them directly.
-- Keep `skills/openspec-verify-loop/` self-contained: consumers have no npm dependencies. Resolve bundled resources from the installation directory and project files from the consuming checkout.
+- Use Node.js >=22.18 and `npm ci`. Run `npm run check` for code changes: types, build, deterministic tests, and package validation. Documentation-only edits do not need the suite.
+- Edit `src/`; `npm run build` generates the committed `dist/index.js`. Keep host SDK/runtime dependencies external to the bundle.
+- Resolve packaged resources from `import.meta.url` and consuming project paths from the invoking session's location. The plugin must never start, replace, or stop an OpenCode service.
 
 ## Loop invariants
 
-- Run workers sequentially, with a fresh session for each verification and fix.
+- Workers run sequentially, with a fresh session for each verification and fix.
 - Clean requires a fresh complete verifier report, zero findings at every severity, evidenced prior resolutions, and passing applicable checks against the same workspace revision.
-- Persist dispatch identities before network mutations. OpenCode 2.2.5 can restart execution for a duplicate input ID: reconcile existing inputs instead of replaying uncertain submissions.
-- Keep state outside the checkout and installed skill. Retain checkout reservations until worker termination is confirmed.
+- Persist dispatch identities before mutations. OpenCode 2.2.5 can restart execution for duplicate input IDs: reconcile saved inputs instead of replaying uncertain submissions.
+- Keep state outside the checkout/package and retain checkout reservations until worker termination is confirmed. Plugin cleanup must drain owned tasks before relinquishing execution ownership.
+- Worker sessions cannot invoke loop management or delegate further workers. Reporting turns cannot use tools.
 
-## Integration checks
-
-Use deterministic tests for loop behavior. For OpenCode integration changes, use isolated fixtures with `VERIFY_LOOP_LIVE_MODEL=provider/model npm run test:live`; this calls the configured model. See [README.md](README.md) for usage and [docs/verification.md](docs/verification.md) for API findings and tested limits.
+The automated suite uses fake host/model adapters; it must not call models or start OpenCode sessions. Real-host testing is manual; see [docs/verification.md](docs/verification.md).

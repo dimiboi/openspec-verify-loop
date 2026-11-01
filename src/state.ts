@@ -15,9 +15,9 @@ export type Pending = {
   before: Snapshot; evidence?: Evidence;
 };
 export type RunState = {
-  schemaVersion: 1; controllerVersion: string; runId: string; project: string; runDir: string;
+  schemaVersion: 2; pluginVersion: string; originSessionId?: string; runId: string; project: string; runDir: string;
   config: Config; pins: Pins; phase: Phase; nextRole: 'verifier' | 'fixer'; round: number;
-  createdAt: number; updatedAt: number; activeMs: number; controllerPid?: number;
+  createdAt: number; updatedAt: number; activeMs: number; executor?: {pid: number; runtimeId: string};
   pending?: Pending; prior: Finding[]; verifier?: VerifierReport; fixer?: FixerReport;
   taskContext?: Evidence['apply'];
   stalledCycles: number; lastFixFingerprint?: string; lastFixWorkspace?: string;
@@ -31,6 +31,7 @@ export function defaultStateRoot() {
   return join(homedir(), '.local/state/openspec-verify-loop');
 }
 export const projectKey = (project: string) => digest(project).slice(0, 24);
+export const projectRunsDirectory = (root: string, project: string) => join(resolve(root), 'runs', projectKey(project));
 export function newId(prefix: string) { return `${prefix}_${Date.now().toString(16)}${randomUUID().replaceAll('-', '')}`; }
 export async function atomicWrite(path: string, value: unknown, raw = false) {
   await mkdir(dirname(path), {recursive: true, mode: 0o700});
@@ -42,20 +43,20 @@ export async function atomicWrite(path: string, value: unknown, raw = false) {
 }
 export function runDirectory(root: string, project: string, runId: string) {
   if (!/^run_[a-f0-9]+$/.test(runId)) throw new Error('Invalid run ID');
-  return join(resolve(root), projectKey(project), runId);
+  return join(projectRunsDirectory(root, project), runId);
 }
-export async function ensureExternalState(root: string, project: string, skillDir?: string) {
+export async function ensureExternalState(root: string, project: string, packageDir?: string) {
   const requested = resolve(root);
   let ancestor = requested;
   while (!await exists(ancestor)) ancestor = dirname(ancestor);
   const canonical = resolve(await realpath(ancestor),relative(ancestor,requested));
-  if (contained(await realpath(project), canonical) || (skillDir && contained(await realpath(skillDir), canonical))) {
-    throw new Error('Run state must be outside the checkout and installed skill');
+  if (contained(await realpath(project), canonical) || (packageDir && contained(await realpath(packageDir), canonical))) {
+    throw new Error('Run state must be outside the checkout and installed plugin');
   }
   await mkdir(canonical, {recursive: true, mode: 0o700});
   return canonical;
 }
-const lockSchema = z.object({runId: z.string(), runDir: z.string(), pid: z.number().int().nullable(), token: z.string()});
+const lockSchema = z.object({runId: z.string(), runDir: z.string(), pid: z.number().int().nullable(), runtimeId: z.string(), token: z.string()});
 type Lock = z.infer<typeof lockSchema>;
 function alive(pid: number) {
   try { process.kill(pid, 0); return true; } catch (e) { return (e as NodeJS.ErrnoException).code !== 'ESRCH'; }
@@ -65,7 +66,7 @@ export class RunStore {
   readonly lockDir: string;
   private token = randomUUID();
   private owns = false;
-  constructor(public state: RunState, lockRoot = join(defaultStateRoot(), 'locks')) {
+  constructor(public state: RunState, lockRoot = join(defaultStateRoot(), 'locks'), readonly runtimeId: string = randomUUID()) {
     this.lockDir = join(lockRoot, projectKey(state.project));
   }
   async acquire(resume = false) {
@@ -85,9 +86,9 @@ export class RunStore {
       catch { throw new LoopError('blocked', `Another recovery owns ${this.lockDir}`); }
     }
     this.owns = true;
-    await atomicWrite(join(this.lockDir, 'owner.json'), {runId: this.state.runId, runDir: this.state.runDir, pid: process.pid, token: this.token});
+    await atomicWrite(join(this.lockDir, 'owner.json'), {runId: this.state.runId, runDir: this.state.runDir, pid: process.pid, runtimeId: this.runtimeId, token: this.token});
     await rm(join(this.lockDir, 'recovery'), {force: true});
-    this.state.controllerPid = process.pid;
+    this.state.executor = {pid: process.pid, runtimeId: this.runtimeId};
     await this.save();
   }
   async ownerPid(): Promise<number | null> {
@@ -110,7 +111,7 @@ export class RunStore {
     const path = join(this.lockDir, 'owner.json');
     const owner = lockSchema.parse(JSON.parse(await readFile(path, 'utf8')));
     if (owner.token !== this.token) throw new Error('Checkout lock ownership changed');
-    delete this.state.controllerPid;
+    delete this.state.executor;
     await this.save();
     if (retainReservation) await atomicWrite(path, {...owner, pid: null});
     else await rm(this.lockDir, {recursive: true});
@@ -121,7 +122,7 @@ export class RunStore {
 
 export async function loadRun(runDir: string, project: string): Promise<RunState> {
   const value = JSON.parse(await readFile(join(runDir, 'state.json'), 'utf8')) as RunState;
-  if (value.schemaVersion !== 1 || value.controllerVersion !== VERSION || value.project !== project || value.runDir !== runDir ||
+  if (value.schemaVersion !== 2 || value.pluginVersion !== VERSION || value.project !== project || value.runDir !== runDir ||
       value.pins?.project !== project || !Number.isInteger(value.round) || value.round < 1 || !Array.isArray(value.prior)) {
     throw new Error('Incompatible or invalid saved run state');
   }

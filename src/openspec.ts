@@ -3,6 +3,7 @@ import { readdir, readFile, realpath, lstat } from 'node:fs/promises';
 import { dirname, join, resolve, relative, sep } from 'node:path';
 import type { Adapter, Catalog, Model } from './opencode.js';
 import { parseModel } from './opencode.js';
+import { workerPolicyDigest, workerPermissions, type Permission } from './workers.js';
 import type { Config } from './config.js';
 import { LoopError, command, contained, digest, exists, jsonCommand, snapshot, type CommandResult, type Snapshot } from './util.js';
 
@@ -18,9 +19,10 @@ const applySchema = z.object({state: z.enum(['ready', 'blocked', 'all_done']),
 export type Target = {project: string; changeName: string; targetPath: string; root: string; schema: string};
 export type Pins = Target & {
   openspecVersion: string; procedurePath: string; procedureDigest: string; scopeDigest: string;
-  profilesDigest: string; configDigest: string;
+  workerPolicyDigest: string; configDigest: string;
   projectConfigDigest: string; trackingPaths: string[];
   agents: {verifier: string; fixer: string}; models: {verifier: Model; fixer: Model};
+  permissions: {verifier: Permission[]; fixer: Permission[]};
 };
 export type Evidence = {validation: CommandResult; apply: z.infer<typeof applySchema>;
   checks: CommandResult[]; before: Snapshot; after: Snapshot};
@@ -72,33 +74,31 @@ async function scopeDigest(target: Target, trackingPaths: string[]) {
 async function projectConfigDigest(project: string) {
   const hashes: [string,string][] = [];
   for(const path of ['AGENTS.md','.opencode/AGENTS.md','opencode.json','opencode.jsonc',
-    '.opencode/opencode.json','.opencode/opencode.jsonc','.opencode/openspec-verify-loop.json','openspec/config.yaml','openspec/config.yml']) {
+    '.opencode/opencode.json','.opencode/opencode.jsonc','openspec/config.yaml','openspec/config.yml']) {
     if(await exists(join(project,path)))hashes.push([path,digest(await readFile(join(project,path)))]);
   }
   if(await exists(join(project,'openspec/schemas')))hashes.push(['schemas',await directoryDigest(join(project,'openspec/schemas'))]);
   return digest(JSON.stringify(hashes));
 }
-function resolveProfiles(catalog: Catalog, config: Config) {
-  const agents = {verifier: 'openspec-loop-verifier', fixer: 'openspec-loop-fixer'};
-  const profiles = [agents.verifier, agents.fixer].map(id => {
-    const a = catalog.agents.find(a => a.id === id);
-    if (!a || a.mode === 'subagent') throw new LoopError('blocked', `Missing API-capable agent ${id}; run setup and reload OpenCode`);
-    return a;
-  });
+function resolveWorkers(catalog: Catalog, config: Config, options: {originModel?: Model; models?: Pins['models']} = {}) {
+  const build = catalog.agents.find(agent => agent.id === 'build');
+  if (!build || build.mode === 'subagent') throw new LoopError('blocked', 'An API-capable build agent is required');
+  const agents = {verifier: 'build', fixer: 'build'};
   const models = {} as Pins['models'];
-  for (const [i, role] of (['verifier', 'fixer'] as const).entries()) {
+  for (const role of ['verifier', 'fixer'] as const) {
     const override = role === 'verifier' ? config.verifierModel : config.fixerModel;
-    const model = override ? parseModel(override) : profiles[i]!.model ?? catalog.defaultModel;
-    if (!model) throw new LoopError('blocked', `No default ${role} model; configure one in OpenCode or the loop configuration`);
+    const model = options.models?.[role] ?? (override ? parseModel(override) : options.originModel ?? build.model ?? catalog.defaultModel);
+    if (!model) throw new LoopError('blocked', `No ${role} model; select one in OpenCode or set the plugin's role model option`);
     const available = catalog.models.find(m => m.providerID === model.providerID && m.id === model.id && m.enabled);
     if (!available || (model.variant && !available.variants.includes(model.variant))) {
       throw new LoopError('blocked', `Unavailable ${role} model ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ''}`);
     }
     models[role] = model;
   }
-  return {agents, models, profilesDigest: digest(JSON.stringify(profiles))};
+  return {agents, models, workerPolicyDigest: workerPolicyDigest(build),
+    permissions: {verifier: workerPermissions('verifier', build.permissions), fixer: workerPermissions('fixer', build.permissions)}};
 }
-export async function pinTarget(target: Target, config: Config, adapter: Adapter): Promise<Pins> {
+export async function pinTarget(target: Target, config: Config, adapter: Adapter, options: {originModel?: Model; models?: Pins['models']} = {}): Promise<Pins> {
   const version = await command(['openspec', '--version'], target.project);
   if (version.exitCode || version.stdout.trim() !== '1.16.0') throw new LoopError('blocked', 'OpenSpec 1.16.0 is required for this release');
   const catalog = await adapter.catalog(target.project);
@@ -114,7 +114,7 @@ export async function pinTarget(target: Target, config: Config, adapter: Adapter
     const local = join(target.project,'.opencode/skills/openspec-verify-change/SKILL.md');
     if (await exists(local)) procedurePath = await realpath(local);
     else {
-      if (matches.length !== 1) throw new LoopError('blocked', 'Expected one openspec-verify-change skill; install the expanded OpenSpec workflow or choose --skill');
+      if (matches.length !== 1) throw new LoopError('blocked', 'Expected one openspec-verify-change skill; install the expanded OpenSpec workflow or set the skill plugin option');
       procedurePath = await realpath(matches[0]!.path);
     }
   }
@@ -127,11 +127,11 @@ export async function pinTarget(target: Target, config: Config, adapter: Adapter
   return {...target, openspecVersion: version.stdout.trim(), procedurePath,
     procedureDigest: await directoryDigest(dirname(procedurePath)), scopeDigest: await scopeDigest(target,trackingPaths),
     trackingPaths,projectConfigDigest:await projectConfigDigest(target.project),
-    configDigest: digest(JSON.stringify(config)), ...resolveProfiles(catalog, config)};
+    configDigest: digest(JSON.stringify(config)), ...resolveWorkers(catalog, config, options)};
 }
 export async function checkPins(pins: Pins, config: Config, adapter: Adapter) {
   const target = await selectTarget(pins.project, pins.changeName);
-  const current = await pinTarget(target, config, adapter);
+  const current = await pinTarget(target, config, adapter, {models: pins.models});
   if (digest(JSON.stringify(current)) !== digest(JSON.stringify(pins))) {
     throw new LoopError('blocked', 'Pinned target, requirements, procedure, model, or agent configuration changed; review it and start a new run');
   }

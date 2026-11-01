@@ -1,10 +1,10 @@
 {
   "name": "openspec-verify-loop",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "An installable OpenCode skill that verifies and fixes an OpenSpec change until clean",
+  "description": "Native OpenCode plugin that verifies and fixes an OpenSpec change until clean",
   "engines": {
     "node": ">=22.18.0"
   },
@@ -12,11 +12,11 @@
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "test:live": "tsx tests/live.ts",
-    "check": "npm run typecheck && npm run build && npm test && node scripts/validate-skill.mjs"
+    "check": "npm run typecheck && npm run build && npm test && node scripts/validate-plugin.mjs"
   },
   "dependencies": {
     "@opencode/client": "2.2.5",
+    "@opencode/plugin": "2.2.5",
     "zod": "4.6.7"
   },
   "devDependencies": {
@@ -25,5 +25,13 @@
     "esbuild": "0.28.2",
     "tsx": "4.23.15",
     "typescript": "7.0.2"
-  }
+  },
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "skills/openspec-verify-loop",
+    "LICENSE"
+  ]
 }

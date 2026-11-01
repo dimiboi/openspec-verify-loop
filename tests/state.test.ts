@@ -32,7 +32,7 @@ test('two controllers cannot simultaneously resume the same reservation',async t
   const a=new FakeAdapter(()=>({status:'awaiting_input',requests:[{id:'request'}]}));
   const s=await createRun(f.project,configSchema.parse({stateDir:f.stateDir}),a,undefined,{lockRoot:f.lockRoot});
   const first=new RunStore(s,f.lockRoot);await first.acquire(true);
-  assert.equal(JSON.parse(await readFile(join(s.runDir,'state.json'),'utf8')).controllerPid,process.pid);
+  assert.equal(JSON.parse(await readFile(join(s.runDir,'state.json'),'utf8')).executor.pid,process.pid);
   const second=new RunStore(structuredClone(s),f.lockRoot);
   await assert.rejects(second.acquire(true),/still running/);
   await first.release(true);

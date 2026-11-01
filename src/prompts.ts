@@ -3,11 +3,13 @@ import { dirname } from 'node:path';
 import type { RunState } from './state.js';
 import type { Evidence } from './openspec.js';
 import { reportJsonSchema } from './reports.js';
+import { commonInstructions, workerInstructions } from './workers.js';
 
 export async function workerPrompt(s: RunState, role: 'verifier' | 'fixer', evidence?: Evidence) {
   const procedure = await readFile(s.pins.procedurePath, 'utf8');
   return [
     `Perform exactly one ${role} assignment for the pinned OpenSpec change. The controller owns the loop.`,
+    workerInstructions[role], commonInstructions,
     `Identity (copy these values exactly into the report): ${JSON.stringify({schemaVersion:1, runId:s.runId, round:s.round,
       changeName:s.pins.changeName, targetPath:s.pins.targetPath, role})}`,
     `Checkout: ${s.project}\nVerification procedure: ${s.pins.procedurePath}\nResource base directory: ${dirname(s.pins.procedurePath)}`,

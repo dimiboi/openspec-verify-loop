@@ -62,7 +62,7 @@ export class FakeAdapter implements Adapter {
     const skill = join(project,'.opencode/skills/openspec-verify-change/SKILL.md');
     return {version:OPENCODE_VERSION,defaultModel:{providerID:'fake',id:'test'},
       models:[{id:'test',providerID:'fake',enabled:true,variants:['default']}],
-      agents:['verifier','fixer'].map(role=>({id:`openspec-loop-${role}`,name:role,mode:'all',hidden:false,request:{settings:{},headers:{},body:{}},permissions:[]})),
+      agents:[{id:'build',name:'Build',mode:'primary',hidden:false,request:{settings:{},headers:{},body:{}},permissions:[]}],
       skills:[{id:skill,name:'openspec-verify-change',path:skill,content:await readFile(skill,'utf8')}]};
   }
   async ensureSession(a: Assignment) { if(!this.sessions.has(a.sessionId)) {this.sessions.set(a.sessionId,a);this.creations++;} }

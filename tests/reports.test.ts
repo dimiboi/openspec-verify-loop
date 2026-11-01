@@ -5,7 +5,7 @@ import { parseReport, needsRepair } from '../src/reports.js';
 import type { Assignment } from '../src/opencode.js';
 
 const a: Assignment = {project:'/tmp/project',runId:'run_a',round:1,role:'verifier',agent:'test',
-  sessionId:'ses_a',inputId:'msg_a',model:{providerID:'fake',id:'test'},prompt:''};
+  sessionId:'ses_a',inputId:'msg_a',model:{providerID:'fake',id:'test'},permissions:[],prompt:''};
 const identity = {runId:a.runId,round:a.round,changeName:'add-greeting',targetPath:'/tmp/project/openspec/changes/add-greeting'};
 test('accepts evidenced clean report and whole JSON fence',()=>{
   const r=verifier(a);
