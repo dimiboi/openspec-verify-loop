@@ -5,7 +5,7 @@ import { executeLoop, persistOutcome, prepareRun, prepareResume, stopRun, type L
 import type { Adapter, Model } from './opencode.js';
 import type { Config } from './config.js';
 import { atomicWrite, defaultStateRoot, loadRun, projectRunsDirectory, runDirectory, RunStore, type RunState } from './state.js';
-import { digest, errorMessage, LoopError } from './util.js';
+import { digest, errorMessage, LoopError, VERSION } from './util.js';
 import { runSummary } from './summary.js';
 
 export { runSummary } from './summary.js';
@@ -84,8 +84,13 @@ export class RunManager {
     try { names = await readdir(projectRunsDirectory(config.stateDir ?? defaultStateRoot(), project)); }
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {outcome: 'status', runs: []}; throw error; }
     const runs = await Promise.all(names.filter(name => /^run_[a-f0-9]+$/.test(name)).map(async name => {
-      const store = await this.store(project, config, name);
-      return {summary: runSummary(store.state), updatedAt: store.state.updatedAt};
+      try {
+        const store = await this.store(project, config, name);
+        return {summary: runSummary(store.state), updatedAt: store.state.updatedAt};
+      } catch (error) {
+        // One unreadable run must not hide the others.
+        return {summary: {outcome: 'unreadable', runId: name, reason: errorMessage(error)}, updatedAt: 0};
+      }
     }));
     return {outcome: 'status', runs: runs.sort((a,b) => b.updatedAt - a.updatedAt).map(run => run.summary)};
   }
@@ -93,10 +98,11 @@ export class RunManager {
     return this.perform(async () => {
       if (this.active.has(project)) throw new LoopError('blocked', 'A verification loop is already running in this checkout');
       const store = await this.store(project, config, runId);
-      if (digest(JSON.stringify(config)) !== digest(JSON.stringify(store.state.config))) {
+      // An older run's version is the actionable blocker; prepareResume reports it.
+      if (store.state.pluginVersion === VERSION && digest(JSON.stringify(config)) !== digest(JSON.stringify(store.state.config))) {
         throw new LoopError('blocked', 'Plugin configuration changed; restore the original options to resume');
       }
-      await prepareResume(store, adapter);
+      await prepareResume(store);
       store.state.originSessionId = sessionId;
       await store.save();
       return this.launch(store, adapter);

@@ -19,7 +19,6 @@ export interface Adapter {
   ensurePrompt(a: Assignment, allowSubmission?: boolean): Promise<void>;
   observe(a: Assignment): Promise<Observation>;
   interrupt(a: Assignment): Promise<boolean>;
-  subscribe?(sessionId: string, signal: AbortSignal, event: (type: string) => void): Promise<void>;
 }
 const request = () => ({signal: AbortSignal.timeout(20_000)});
 function isMissing(e: unknown) { return (e as {_tag?: string})?._tag === 'SessionNotFoundError'; }
@@ -70,7 +69,7 @@ export async function connectToHost(ctx: Pick<Plugin.Context, 'app' | 'session'>
     client = OpenCode.make({baseUrl: endpoint.url, headers: Service.headers(endpoint)});
   }
   await assertHostingServer(ctx.app.version, origin, client);
-  return {adapter: new OpenCodeAdapter(client), origin};
+  return {adapter: new OpenCodeAdapter(client)};
 }
 
 export async function assertHostingServer(version: string, origin: Awaited<ReturnType<Plugin.Context['session']['get']>>, client: OpenCodeClient) {
@@ -161,9 +160,8 @@ export class OpenCodeAdapter implements Adapter {
     return result;
   }
   async observe(a: Assignment): Promise<Observation> {
-    const [session, messages, inbox, permissions, forms] = await Promise.all([
-      this.client.session.get({sessionID: a.sessionId}, request()), this.messages(a.sessionId),
-      this.client.session.inbox.list({sessionID: a.sessionId}, request()),
+    const [session, permissions, forms] = await Promise.all([
+      this.client.session.get({sessionID: a.sessionId}, request()),
       this.client.permission.list({sessionID: a.sessionId}, request()),
       this.client.session.form.list({sessionID: a.sessionId}, request()),
     ]);
@@ -174,6 +172,11 @@ export class OpenCodeAdapter implements Adapter {
       if (detail.state.status === 'pending') requests.push({type: 'question', id: f.id, title: f.title});
     }
     if (requests.length) return {status: 'awaiting_input', requests};
+    // A busy session cannot have finished; collect the transcript only once it looks idle.
+    if ((session.time.busy ?? 0) > (session.time.idle ?? 0)) return {status: 'running'};
+    const [messages, inbox] = await Promise.all([
+      this.messages(a.sessionId), this.client.session.inbox.list({sessionID: a.sessionId}, request()),
+    ]);
     const users = messages.filter(m => m.type === 'user');
     if (users.some(m => m.id !== a.inputId) || inbox.some(m => m.id !== a.inputId)) throw new Error('Unexpected worker input; cannot correlate result');
     if (inbox.length) return {status: 'running'};
@@ -181,7 +184,7 @@ export class OpenCodeAdapter implements Adapter {
     if (inputIndex < 0) return {status: 'running'};
     const tail = messages.slice(inputIndex + 1);
     const idle = tail.findLast(m => m.type === 'idle');
-    if (!idle || idle.type !== 'idle' || (session.time.busy ?? 0) > (session.time.idle ?? 0)) return {status: 'running'};
+    if (!idle || idle.type !== 'idle') return {status: 'running'};
     if (idle.outcome !== 'succeeded' || session.outcome !== 'succeeded') {
       return {status: idle.outcome === 'interrupted' ? 'interrupted' : 'failed', reason: JSON.stringify(idle.error ?? {outcome: idle.outcome})};
     }
@@ -208,13 +211,5 @@ export class OpenCodeAdapter implements Adapter {
       ]);
       return !active[a.sessionId] && !remaining.length && (s.time.busy ?? 0) <= (s.time.idle ?? 0);
     } catch (e) { if (isMissing(e)) return true; throw new Error(`Cannot confirm worker interruption: ${errorMessage(e)}`); }
-  }
-  async subscribe(sessionId: string, signal: AbortSignal, event: (type: string) => void) {
-    try {
-      for await (const e of this.client.event.subscribe({types: ['session.step.started', 'session.tool.called', 'session.execution.succeeded',
-        'session.execution.failed', 'permission.asked', 'form.created'], signal})) {
-        if ('data' in e && e.data && 'sessionID' in e.data && e.data.sessionID === sessionId) event(e.type);
-      }
-    } catch { /* Live events are progress hints; persisted state is authoritative. */ }
   }
 }

@@ -42,7 +42,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { lstat, readFile, readlink, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve as resolve2, sep } from "node:path";
-var VERSION = "0.2.1";
+var VERSION = "0.3.0";
 var OPENCODE_VERSION = "2.2.5";
 var LoopError = class extends Error {
   constructor(outcome, message, details) {
@@ -226,7 +226,7 @@ async function connectToHost(ctx, sessionId, server) {
     client = OpenCode.make({ baseUrl: endpoint.url, headers: Service.headers(endpoint) });
   }
   await assertHostingServer(ctx.app.version, origin, client);
-  return { adapter: new OpenCodeAdapter(client), origin };
+  return { adapter: new OpenCodeAdapter(client) };
 }
 async function assertHostingServer(version, origin, client) {
   const [info, remote] = await Promise.all([
@@ -339,10 +339,8 @@ var OpenCodeAdapter = class {
     return result;
   }
   async observe(a) {
-    const [session, messages, inbox, permissions, forms] = await Promise.all([
+    const [session, permissions, forms] = await Promise.all([
       this.client.session.get({ sessionID: a.sessionId }, request()),
-      this.messages(a.sessionId),
-      this.client.session.inbox.list({ sessionID: a.sessionId }, request()),
       this.client.permission.list({ sessionID: a.sessionId }, request()),
       this.client.session.form.list({ sessionID: a.sessionId }, request())
     ]);
@@ -353,6 +351,11 @@ var OpenCodeAdapter = class {
       if (detail.state.status === "pending") requests.push({ type: "question", id: f.id, title: f.title });
     }
     if (requests.length) return { status: "awaiting_input", requests };
+    if ((session.time.busy ?? 0) > (session.time.idle ?? 0)) return { status: "running" };
+    const [messages, inbox] = await Promise.all([
+      this.messages(a.sessionId),
+      this.client.session.inbox.list({ sessionID: a.sessionId }, request())
+    ]);
     const users = messages.filter((m) => m.type === "user");
     if (users.some((m) => m.id !== a.inputId) || inbox.some((m) => m.id !== a.inputId)) throw new Error("Unexpected worker input; cannot correlate result");
     if (inbox.length) return { status: "running" };
@@ -360,7 +363,7 @@ var OpenCodeAdapter = class {
     if (inputIndex < 0) return { status: "running" };
     const tail = messages.slice(inputIndex + 1);
     const idle = tail.findLast((m) => m.type === "idle");
-    if (!idle || idle.type !== "idle" || (session.time.busy ?? 0) > (session.time.idle ?? 0)) return { status: "running" };
+    if (!idle || idle.type !== "idle") return { status: "running" };
     if (idle.outcome !== "succeeded" || session.outcome !== "succeeded") {
       return { status: idle.outcome === "interrupted" ? "interrupted" : "failed", reason: JSON.stringify(idle.error ?? { outcome: idle.outcome }) };
     }
@@ -388,21 +391,6 @@ var OpenCodeAdapter = class {
     } catch (e) {
       if (isMissing(e)) return true;
       throw new Error(`Cannot confirm worker interruption: ${errorMessage(e)}`);
-    }
-  }
-  async subscribe(sessionId, signal, event) {
-    try {
-      for await (const e of this.client.event.subscribe({ types: [
-        "session.step.started",
-        "session.tool.called",
-        "session.execution.succeeded",
-        "session.execution.failed",
-        "permission.asked",
-        "form.created"
-      ], signal })) {
-        if ("data" in e && e.data && "sessionID" in e.data && e.data.sessionID === sessionId) event(e.type);
-      }
-    } catch {
     }
   }
 };
@@ -507,12 +495,12 @@ import { dirname, join, resolve as resolve3, relative as relative2, sep as sep2 
 
 // src/workers.ts
 var MANAGEMENT_TOOL = "openspec_verify_loop";
-var promptContextVersion = 2;
+var promptContextVersion = 3;
 var workerInstructions = {
   verifier: "Perform one inspection assignment. Execute the pinned verification procedure in full. Leave source, task tracking, requirements, and archival state unchanged. Shell access is permission-controlled, not a filesystem sandbox; do not bypass edit restrictions through the shell.",
-  fixer: "Address every supplied finding and missing check evidence. Preserve unrelated work and run relevant checks. Do not weaken tests, requirements, or approved scope to manufacture a clean result. Requirements/design decisions and external prerequisites are blockers."
+  fixer: "Address every supplied finding and missing check evidence with small, checked edits. Preserve unrelated work. Do not weaken tests, requirements, or approved scope to manufacture a clean result. Dispute an incorrect finding with evidence; unsettled requirements decisions and external prerequisites are blockers."
 };
-var commonInstructions = "The controller owns sequencing. Do not launch workers, invoke openspec_verify_loop, commit, push, merge, deploy, sync specs, or archive. Follow repository instructions. Scope searches to relevant source/tests, read focused ranges, and quote shell globs. Review committed implementation even when git status is clean. Keep lengthy command output in logs outside the checkout; preserve the actual command exit status when limiting displayed output. Complete only this assignment and return exactly the requested report.";
+var commonInstructions = "The controller owns sequencing. Do not launch workers, invoke openspec_verify_loop, commit, push, merge, deploy, sync specs, or archive. Do not inspect other sessions, loop state, or orchestration tooling; use only the supplied report paths. Follow repository instructions. Navigation: first get the implementation's changed-file map (git log/show --stat for the change's commits, git diff --stat for uncommitted work) to target reads, not to limit review; review committed implementation even when git status is clean. Use exposed symbol tools (e.g. Serena) for code symbols and rg -n scoped to source/test directories for CSS, config, and test text; quote shell globs. Read bounded ranges around hits, never re-read a range already in context, and narrow any search that hits a result cap. Keep lengthy command output in logs outside the checkout; preserve the actual exit status when limiting output and do not hide stderr. Complete only this assignment and return exactly the requested report.";
 function workerPermissions(role, base = []) {
   return [
     ...role === "verifier" ? [
@@ -703,11 +691,12 @@ async function gatherEvidence(pins, config, signal) {
   if (before.hash !== after.hash) throw new LoopError("blocked", "A configured check modified source or unignored files; ignore its generated outputs or fix the check");
   return { validation, apply, checks, before, after };
 }
-function evidenceFailures(e) {
+function evidenceFailures(e, checkIds) {
   return [
     ...e.validation.exitCode ? ["OpenSpec strict validation failed"] : [],
     ...e.apply.progress.remaining ? [`${e.apply.progress.remaining} OpenSpec tasks remain incomplete`] : [],
-    ...e.checks.filter((c) => c.exitCode).map((c) => `Required check failed: ${JSON.stringify(c.command)}`)
+    // The check ID keeps same-command checks in different directories distinct.
+    ...e.checks.flatMap((c, i) => c.exitCode ? [`Required check ${checkIds[i]} failed: ${JSON.stringify(c.command)}`] : [])
   ];
 }
 
@@ -716,7 +705,7 @@ import { z as z4 } from "zod";
 var text = z4.string().trim().min(1);
 var evidence = z4.array(text);
 var common = {
-  schemaVersion: z4.literal(1),
+  schemaVersion: z4.literal(2),
   runId: text,
   round: z4.number().int().positive(),
   changeName: text,
@@ -737,15 +726,8 @@ var verifierSchema = z4.strictObject({
   ...common,
   role: z4.literal("verifier"),
   verificationComplete: z4.boolean(),
-  outcome: z4.enum(["clean", "findings", "blocked"]),
   findings: z4.array(findingSchema),
-  checks: z4.array(z4.strictObject({
-    id: text,
-    description: text,
-    status: z4.enum(["verified", "failed", "not_verified", "not_applicable"]),
-    evidence,
-    reason: z4.string()
-  })),
+  notVerified: z4.array(z4.strictObject({ check: text, reason: text, repairable: z4.boolean() })),
   priorFindingResolutions: z4.array(z4.strictObject({
     findingId: text,
     status: z4.enum(["resolved", "unresolved", "not_applicable"]),
@@ -759,6 +741,8 @@ var fixerSchema = z4.strictObject({
   outcome: z4.enum(["completed", "blocked"]),
   addressedFindings: z4.array(z4.strictObject({ findingId: text, evidence })),
   unresolvedFindings: z4.array(z4.strictObject({ findingId: text, reason: text })),
+  // A dispute is a disposition, not a resolution: the next fresh verifier decides it.
+  disputedFindings: z4.array(z4.strictObject({ findingId: text, evidence })).default([]),
   changedFiles: z4.array(text),
   checksRun: z4.array(z4.strictObject({
     command: z4.array(text).min(1),
@@ -784,59 +768,51 @@ function parseReport(raw, role, expected, prior) {
       }
     }
   }
-  const report = role === "verifier" ? verifierSchema.parse(value) : fixerSchema.parse(value);
+  if (role === "verifier" && value && typeof value === "object") delete value.outcome;
+  const report = role === "verifier" ? { ...verifierSchema.parse(value), outcome: "findings" } : fixerSchema.parse(value);
   for (const key of ["runId", "round", "changeName", "targetPath"]) {
     if (report[key] !== expected[key]) throw new Error(`Report ${key} does not match pending assignment`);
   }
-  if (report.role === "verifier") validateVerifier(report, prior);
-  else validateFixer(report, prior);
+  if (report.role === "verifier") {
+    const closed = new Set(report.priorFindingResolutions.filter((p) => p.status !== "unresolved").map((p) => p.findingId));
+    for (const finding of report.findings) if (closed.has(finding.id)) finding.id = `${finding.id}-r${report.round}`;
+    validateVerifier(report, prior);
+    report.outcome = verifierOutcome(report);
+  } else validateFixer(report, prior);
   return report;
+}
+function verifierOutcome(r) {
+  if (r.blockers.length || r.notVerified.some((c) => !c.repairable)) return "blocked";
+  return r.verificationComplete && !r.findings.length && !r.notVerified.length && r.priorFindingResolutions.every((p) => p.status !== "unresolved") ? "clean" : "findings";
 }
 function validateVerifier(r, prior) {
   unique(r.findings.map((f) => f.id), "finding IDs");
-  unique(r.checks.map((c) => c.id), "check IDs");
+  unique(r.notVerified.map((c) => c.check), "not-verified checks");
   unique(r.priorFindingResolutions.map((p) => p.findingId), "prior resolutions");
-  for (const check of r.checks) {
-    if (check.status === "verified" && !check.evidence.length) throw new Error(`Check ${check.id} lacks evidence`);
-    if (check.status !== "verified" && !check.reason.trim()) throw new Error(`Check ${check.id} lacks a reason`);
-  }
   const priorIds = new Set(prior.map((f) => f.id));
   for (const resolution of r.priorFindingResolutions) {
     if (!priorIds.has(resolution.findingId)) throw new Error(`Unknown prior finding ${resolution.findingId}`);
     if (resolution.status === "resolved" && !resolution.evidence.length) throw new Error("Resolution lacks evidence");
     if (resolution.status !== "resolved" && !resolution.reason.trim()) throw new Error("Resolution lacks a reason");
-    if (resolution.status !== "unresolved" && r.findings.some((f) => f.id === resolution.findingId)) {
-      throw new Error("Resolved finding still appears in findings");
-    }
   }
   for (const finding of prior) {
     if (!r.priorFindingResolutions.some((p) => p.findingId === finding.id)) {
       throw new Error(`Missing resolution for prior finding ${finding.id}`);
     }
   }
-  if (r.outcome === "blocked" && !r.blockers.length) throw new Error("Blocked report lacks blockers");
-  if (r.outcome === "clean") {
-    const dimensions = ["completeness", "correctness", "coherence"];
-    if (!r.verificationComplete || r.findings.length || r.blockers.length || r.checks.some((c) => !["verified", "not_applicable"].includes(c.status)) || r.priorFindingResolutions.some((p) => p.status === "unresolved") || dimensions.some((id) => !r.checks.some((c) => c.id === id))) {
-      throw new Error("Contradictory or incomplete clean report");
-    }
-  }
-  if (r.outcome === "findings" && !needsRepair(r, prior).length && !r.blockers.length) {
-    throw new Error("Findings outcome has no actionable finding or missing evidence");
-  }
 }
 function validateFixer(r, prior) {
-  const ids = [...r.addressedFindings.map((f) => f.findingId), ...r.unresolvedFindings.map((f) => f.findingId)];
+  const ids = [...r.addressedFindings, ...r.unresolvedFindings, ...r.disputedFindings].map((f) => f.findingId);
   unique(ids, "fix dispositions");
   for (const id of ids) if (!prior.some((f) => f.id === id)) throw new Error(`Unknown fixer finding ${id}`);
   for (const f of prior) if (!ids.includes(f.id)) throw new Error(`Fixer omitted finding ${f.id}`);
-  if (r.addressedFindings.some((f) => !f.evidence.length)) throw new Error("Fix lacks evidence");
+  if ([...r.addressedFindings, ...r.disputedFindings].some((f) => !f.evidence.length)) throw new Error("Fix or dispute lacks evidence");
   if (r.outcome === "completed" && (r.unresolvedFindings.length || r.blockers.length || r.checksRun.some((c) => c.exitCode !== 0))) {
     throw new Error("Completed fixer still has unresolved work or failed checks");
   }
   if (r.outcome === "blocked" && !r.blockers.length && !r.unresolvedFindings.length) throw new Error("Blocked fixer lacks explanation");
 }
-function needsRepair(r, prior) {
+function needsRepair(r, prior, evidenceFailures2 = []) {
   const result = [...r.findings];
   const add = (f) => {
     if (!result.some((x) => x.id === f.id)) result.push(f);
@@ -845,28 +821,26 @@ function needsRepair(r, prior) {
     const f = prior.find((f2) => f2.id === p.findingId);
     if (f) add(f);
   }
-  for (const c of r.checks.filter((c2) => ["failed", "not_verified"].includes(c2.status))) {
+  for (const c of r.notVerified.filter((c2) => c2.repairable)) {
     add({
-      id: `check:${c.id}`,
+      id: `check:${c.check}`,
       severity: "warning",
       category: "verification",
-      title: c.description,
+      title: `Not verified: ${c.check}`,
       explanation: c.reason,
       locations: [],
       recommendation: "Repair the check or provide the missing verification evidence."
     });
   }
-  for (const id of ["completeness", "correctness", "coherence"]) {
-    if (!r.checks.some((c) => c.id === id)) add({
-      id: `dimension:${id}`,
-      severity: "warning",
-      category: "verification",
-      title: `Missing ${id} verification`,
-      explanation: "Required verification dimension was not reported.",
-      locations: [],
-      recommendation: "Provide the missing verification evidence."
-    });
-  }
+  for (const failure of evidenceFailures2) add({
+    id: `evidence:${failure.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`,
+    severity: "critical",
+    category: "verification",
+    title: failure,
+    explanation: "The controller's independent check evidence failed; see the saved checks.json.",
+    locations: [],
+    recommendation: "Make the failing check pass (including any documented dependency setup) without weakening it."
+  });
   if (!r.verificationComplete) add({
     id: "verification:incomplete",
     severity: "warning",
@@ -1054,7 +1028,7 @@ var RunStore = class {
 };
 async function loadRun(runDir, project) {
   const value = JSON.parse(await readFile3(join2(runDir, "state.json"), "utf8"));
-  if (value.schemaVersion !== 2 || value.pluginVersion !== VERSION || value.project !== project || value.runDir !== runDir || value.pins?.project !== project || !Number.isInteger(value.round) || value.round < 1 || !Array.isArray(value.prior)) {
+  if (value.schemaVersion !== 2 || value.project !== project || value.runDir !== runDir || value.pins?.project !== project || !Number.isInteger(value.round) || value.round < 1 || !Array.isArray(value.prior)) {
     throw new Error("Incompatible or invalid saved run state");
   }
   return value;
@@ -1117,18 +1091,17 @@ Pinned procedure/resource digest: ${s.pins.procedureDigest}`,
     role === "verifier" ? `The authoritative pinned verification procedure is already loaded below. Execute it in full; do not rediscover or reread its entrypoint. Read referenced relative resources from the resource base directory when needed.
 <openspec-verification-procedure>
 ${procedure}
-</openspec-verification-procedure>` : "Use the pinned procedure path and resources when a supplied finding needs that context. Complete the fixing assignment, then return its outcome to the controller.",
-    role === "verifier" ? "Inspect only. Re-read the artifacts and implementation and perform full verification, including new regressions. Use the controller's current check evidence for matching commands against this workspace; run additional procedure checks and repeat a check when new changes, failures, or uncertainty require it. Previous-round evidence cannot establish current success. Do not implement, change task state, sync specs, or archive. Include individual checks from the procedure AND aggregate checks with IDs completeness, correctness, coherence. Clean means all severities zero, every prior finding resolved with evidence, and every applicable check verified. A justified not_applicable check is allowed. Recommendations are suggestions. Missing evidence is not a passing check." : "Fix every supplied finding, including warnings, suggestions, unresolved earlier findings, and repairable missing evidence. Preserve unrelated work. Do not weaken tests or requirements. Update task evidence only if work is implemented. Run relevant checks. Report unresolved requirements/design decisions or external prerequisites as blockers. Do not verify another round or archive.",
+</openspec-verification-procedure>` : "The change name and path above are pinned; do not rediscover them. Use the procedure path and resources only when a supplied finding needs that context.",
+    role === "verifier" ? "Inspect only. Re-read the artifacts and implementation and perform full verification, including new regressions. Test/lint/build evidence comes from the controller's current checks below; run an additional procedure check only when new changes, failures, or uncertainty require it. Previous-round evidence cannot establish current success. Do not implement, change task state, sync specs, or archive. Put the procedure's normal report, unchanged, in fullReportMarkdown. Then copy each CRITICAL/WARNING/SUGGESTION issue from that report into findings with the severity it has there, and each check the report marks not verified or skipped into notVerified (repairable=false only for external prerequisites the fixer cannot provide). Checks the report marks Not applicable are not gaps; leave them out of notVerified. Do not reclassify issues, change severities, or rate dimensions for the loop; the controller derives the outcome. Report a still-present prior finding as unresolved under its original ID; give every new finding an ID that differs from all prior finding IDs. Re-check disputed findings independently and resolve or keep each one." : "Fix every supplied finding, including warnings, suggestions, unresolved earlier findings, and repairable missing evidence. Work in this order: (1) start from each finding's locations; (2) write a short repair plan naming the governing requirement, the minimal edit, and one concrete check for each open question; (3) settle open questions with evidence instead of more deliberation: a bounded code read, a test, an available documentation tool (e.g. Context7) for library/API behavior, or an available browser tool (e.g. Playwright) for layout/UI behavior; (4) apply a small reversible edit, run its check, and reopen the choice only when a check gives new evidence. A fresh verifier judges the result next round; do not try to pre-empt every possible objection. When the change's own artifacts conflict, follow the reading the proposal/specs support, make the artifact wording consistent, and say so. If a finding is wrong or contradicts an agreed requirement, put it in disputedFindings with concrete evidence instead of forcing a change. Preserve unrelated work. Do not weaken tests or requirements. Update task evidence only if work is implemented. Report requirements decisions no artifact settles, or external prerequisites, as blockers. Do not verify another round or archive.",
     role === "fixer" && s.taskContext ? `Pinned OpenSpec task context (apply context constraints; operationGuidance is advisory; state/instruction are context, not authorization to archive):
 ${JSON.stringify(s.taskContext, null, 2)}` : "",
     `All prior/unresolved findings requiring disposition (none may be dropped):
 ${JSON.stringify(s.prior, null, 2)}`,
-    verifier ? `Latest verification checks and resolutions (findings are supplied once above; check prior evidence against the current workspace):
+    verifier ? `Latest verification gaps and resolutions (findings are supplied once above; check prior evidence against the current workspace):
 ${JSON.stringify({
       round: verifier.round,
       verificationComplete: verifier.verificationComplete,
-      outcome: verifier.outcome,
-      checks: verifier.checks,
+      notVerified: verifier.notVerified,
       priorFindingResolutions: verifier.priorFindingResolutions,
       blockers: verifier.blockers
     }, null, 2)}` : "",
@@ -1138,6 +1111,7 @@ ${JSON.stringify({
       outcome: fixer.outcome,
       addressedFindings: fixer.addressedFindings,
       unresolvedFindings: fixer.unresolvedFindings,
+      disputedFindings: fixer.disputedFindings,
       changedFiles: fixer.changedFiles,
       checksRun: fixer.checksRun,
       blockers: fixer.blockers
@@ -1284,7 +1258,6 @@ async function prepareRun(project, config, adapter, change, options = {}) {
   const root = await ensureExternalState(config.stateDir ?? defaultStateRoot(), project, resolve5(dirname4(fileURLToPath(import.meta.url)), ".."));
   const runId2 = newId("run");
   const runDir = runDirectory(root, project, runId2);
-  const initial = await snapshot(project);
   const state = {
     schemaVersion: 2,
     pluginVersion: VERSION,
@@ -1294,7 +1267,6 @@ async function prepareRun(project, config, adapter, change, options = {}) {
     project,
     config,
     pins,
-    initial,
     phase: "preflight",
     nextRole: "verifier",
     round: 1,
@@ -1314,9 +1286,6 @@ async function prepareRun(project, config, adapter, change, options = {}) {
     throw e;
   }
   return store;
-}
-function findingsFingerprint(findings) {
-  return digest(JSON.stringify(findings.map((f) => ({ severity: f.severity, category: f.category.toLowerCase(), locations: [...f.locations].sort() })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))));
 }
 async function executeLoop(store, adapter, options = {}) {
   const s = store.state;
@@ -1361,13 +1330,15 @@ async function executeLoop(store, adapter, options = {}) {
     delete s.requests;
     emit({ event: "started", runId: s.runId, runDir: s.runDir, change: s.pins.changeName, models: s.pins.models });
     await checkPins(s.pins, s.config, adapter);
+    let pinsFresh = true;
     while (true) {
       at("before_dispatch");
       await guard();
       if (!s.pending) {
         if (s.config.maxRounds && s.round > s.config.maxRounds) throw new LoopError("limited", "Verification round limit reached");
         at("checking_pins");
-        await checkPins(s.pins, s.config, adapter);
+        if (!pinsFresh) await checkPins(s.pins, s.config, adapter);
+        pinsFresh = false;
         const role = s.nextRole;
         at("gathering_evidence");
         const evidence2 = role === "verifier" ? await gatherEvidence(s.pins, s.config, workSignal) : void 0;
@@ -1391,7 +1362,7 @@ async function executeLoop(store, adapter, options = {}) {
           permissions: s.pins.permissions[role],
           prompt
         };
-        s.pending = { assignment, stage: "prepared", before, ...evidence2 ? { evidence: evidence2 } : {} };
+        s.pending = { assignment, stage: "prepared", before, ...evidence2 ? { evidenceFailures: evidenceFailures(evidence2, s.config.checks.map((c) => c.id)) } : {} };
         s.phase = role === "verifier" ? "verifying" : "fixing";
         s.workers.push({ sessionId: assignment.sessionId, inputId: assignment.inputId, role, round: s.round, progress: "prepared" });
         await save();
@@ -1423,29 +1394,22 @@ async function executeLoop(store, adapter, options = {}) {
         await save();
       }
       emit({ event: "worker", role: a.role, round: a.round, sessionId: a.sessionId, inputId: a.inputId });
-      const progress = new AbortController();
-      const subscription = adapter.subscribe?.(a.sessionId, progress.signal, (type) => emit({ event: "progress", role: a.role, round: a.round, type }));
       let observation;
       at("observing_worker");
-      try {
-        let failures = 0;
-        while (true) {
-          await guard();
-          try {
-            observation = await adapter.observe(a);
-            failures = 0;
-          } catch (e) {
-            if (++failures >= 3) throw new Error(`Cannot reconcile worker after 3 attempts: ${errorMessage(e)}`);
-            emit({ event: "reconnecting", attempt: failures });
-            await delay(options.pollMs ?? 1e3, workSignal);
-            continue;
-          }
-          if (observation.status !== "running") break;
+      let failures = 0;
+      while (true) {
+        await guard();
+        try {
+          observation = await adapter.observe(a);
+          failures = 0;
+        } catch (e) {
+          if (++failures >= 3) throw new Error(`Cannot reconcile worker after 3 attempts: ${errorMessage(e)}`);
+          emit({ event: "reconnecting", attempt: failures });
           await delay(options.pollMs ?? 1e3, workSignal);
+          continue;
         }
-      } finally {
-        progress.abort();
-        await subscription;
+        if (observation.status !== "running") break;
+        await delay(options.pollMs ?? 1e3, workSignal);
       }
       if (observation.status === "awaiting_input") {
         s.requests = observation.requests;
@@ -1461,10 +1425,9 @@ async function executeLoop(store, adapter, options = {}) {
       await atomicWrite(join5(roundDir, `${a.role}.raw.json`), { sessionId: a.sessionId, inputId: a.inputId, messageId: observation.messageId, text: observation.text });
       if (worker) worker.progress = "completed";
       await save();
-      await persistEvidence(s, a.round, pending.evidence);
-      if (pending.evidence) s.taskContext = pending.evidence.apply;
       at("checking_worker_pins");
       await checkPins(s.pins, s.config, adapter);
+      pinsFresh = true;
       at("checking_workspace");
       const after = await snapshot(s.project);
       await guard();
@@ -1474,11 +1437,8 @@ async function executeLoop(store, adapter, options = {}) {
       }
       at("validating_report");
       const report = parseReport(observation.text, a.role, { runId: s.runId, round: a.round, changeName: s.pins.changeName, targetPath: s.pins.targetPath }, s.prior);
-      if (report.role === "verifier" && report.outcome === "clean") {
-        at("checking_evidence");
-        const failures = pending.evidence ? evidenceFailures(pending.evidence) : ["No independent check evidence"];
-        if (failures.length) throw new Error(`Clean report contradicts independent evidence: ${failures.join("; ")}`);
-      }
+      const failedEvidence = a.role === "verifier" ? pending.evidenceFailures ?? ["No independent check evidence"] : [];
+      if (report.role === "verifier" && report.outcome === "clean" && failedEvidence.length) report.outcome = "findings";
       at("accepting_report");
       await atomicWrite(join5(roundDir, `${a.role}.json`), { sessionId: a.sessionId, inputId: a.inputId, messageId: observation.messageId, workspace: after.hash, report });
       await atomicWrite(join5(roundDir, `${a.role}.md`), report.fullReportMarkdown, true);
@@ -1486,18 +1446,21 @@ async function executeLoop(store, adapter, options = {}) {
       delete s.pending;
       if (report.role === "verifier") {
         s.verifier = report;
-        s.prior = needsRepair(report, s.prior);
+        s.prior = needsRepair(report, s.prior, failedEvidence);
       } else s.fixer = report;
       await save();
       await store.event("report_accepted", { role: a.role, round: a.round, messageId: observation.messageId });
       if (report.role === "verifier") {
         if (report.outcome === "blocked" || report.blockers.length) {
-          await terminate("blocked", report.blockers.join("; "));
+          await terminate("blocked", [
+            ...report.blockers,
+            ...report.notVerified.filter((c) => !c.repairable).map((c) => `Not verified: ${c.check}: ${c.reason}`)
+          ].join("; "));
           break;
         }
         if (report.outcome === "clean") {
           s.phase = "clean";
-          s.reason = "Fresh full verification has zero findings and all applicable checks are verified";
+          s.reason = "Fresh full verification has zero findings, nothing left unverified, and passing controller checks";
           s.prior = [];
           await save();
           break;
@@ -1509,11 +1472,8 @@ async function executeLoop(store, adapter, options = {}) {
           await terminate("blocked", [...report.blockers, ...report.unresolvedFindings.map((f) => f.reason)].join("; "));
           break;
         }
-        const fingerprint = findingsFingerprint(s.prior);
         const unchanged = pending.before.hash === after.hash;
         s.stalledCycles = unchanged ? s.stalledCycles + 1 : 0;
-        s.lastFixFingerprint = fingerprint;
-        s.lastFixWorkspace = after.hash;
         s.nextRole = "verifier";
         s.round++;
         if (s.stalledCycles >= 2) {
@@ -1577,7 +1537,10 @@ async function executeLoop(store, adapter, options = {}) {
   }
   return s;
 }
-async function prepareResume(store, adapter, options = {}) {
+async function prepareResume(store) {
+  if (store.state.pluginVersion !== VERSION) {
+    throw new LoopError("blocked", `Run was created by plugin ${store.state.pluginVersion}; stop it and start a new run`);
+  }
   await store.acquire(true);
   if (store.state.phase === "clean") {
     try {
@@ -1598,7 +1561,7 @@ async function prepareResume(store, adapter, options = {}) {
 async function stopRun(store, adapter, expected) {
   if (!await store.acquire(true, expected)) return store.state;
   try {
-    if (store.state.phase === "clean" && !store.state.pending) {
+    if (!store.state.pending && ["clean", "blocked", "failed", "limited", "interrupted"].includes(store.state.phase)) {
       await persistOutcome(store.state);
       return store.state;
     }
@@ -1717,8 +1680,12 @@ var RunManager = class {
       throw error;
     }
     const runs = await Promise.all(names.filter((name) => /^run_[a-f0-9]+$/.test(name)).map(async (name) => {
-      const store = await this.store(project, config, name);
-      return { summary: runSummary(store.state), updatedAt: store.state.updatedAt };
+      try {
+        const store = await this.store(project, config, name);
+        return { summary: runSummary(store.state), updatedAt: store.state.updatedAt };
+      } catch (error) {
+        return { summary: { outcome: "unreadable", runId: name, reason: errorMessage(error) }, updatedAt: 0 };
+      }
     }));
     return { outcome: "status", runs: runs.sort((a, b) => b.updatedAt - a.updatedAt).map((run) => run.summary) };
   }
@@ -1726,10 +1693,10 @@ var RunManager = class {
     return this.perform(async () => {
       if (this.active.has(project)) throw new LoopError("blocked", "A verification loop is already running in this checkout");
       const store = await this.store(project, config, runId2);
-      if (digest(JSON.stringify(config)) !== digest(JSON.stringify(store.state.config))) {
+      if (store.state.pluginVersion === VERSION && digest(JSON.stringify(config)) !== digest(JSON.stringify(store.state.config))) {
         throw new LoopError("blocked", "Plugin configuration changed; restore the original options to resume");
       }
-      await prepareResume(store, adapter);
+      await prepareResume(store);
       store.state.originSessionId = sessionId;
       await store.save();
       return this.launch(store, adapter);

@@ -155,10 +155,11 @@ export async function gatherEvidence(pins: Pins, config: Config, signal?: AbortS
   if (before.hash !== after.hash) throw new LoopError('blocked', 'A configured check modified source or unignored files; ignore its generated outputs or fix the check');
   return {validation, apply, checks, before, after};
 }
-export function evidenceFailures(e: Evidence): string[] {
+export function evidenceFailures(e: Evidence, checkIds: string[]): string[] {
   return [
     ...(e.validation.exitCode ? ['OpenSpec strict validation failed'] : []),
     ...(e.apply.progress.remaining ? [`${e.apply.progress.remaining} OpenSpec tasks remain incomplete`] : []),
-    ...e.checks.filter(c => c.exitCode).map(c => `Required check failed: ${JSON.stringify(c.command)}`),
+    // The check ID keeps same-command checks in different directories distinct.
+    ...e.checks.flatMap((c, i) => c.exitCode ? [`Required check ${checkIds[i]} failed: ${JSON.stringify(c.command)}`] : []),
   ];
 }

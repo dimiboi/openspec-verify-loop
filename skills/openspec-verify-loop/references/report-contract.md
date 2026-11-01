@@ -8,23 +8,27 @@ surrounding commentary. Include the complete Markdown report in
 Copy `schemaVersion`, `runId`, `round`, `changeName`, `targetPath`, and `role`
 exactly from the assignment. Session/input IDs are attached by the controller.
 
-Verifier reports include `verificationComplete`, `outcome`, `findings`, `checks`,
-`priorFindingResolutions`, `blockers`, and `fullReportMarkdown`. Preserve all
-severities. Each finding needs a stable ID, severity, category, title,
-explanation, locations, and actionable recommendation. Recommendations are
-suggestions. Include individual procedure checks and aggregate checks with IDs
-`completeness`, `correctness`, and `coherence`.
+Verifier reports include `verificationComplete`, `findings`, `notVerified`,
+`priorFindingResolutions`, `blockers`, and `fullReportMarkdown`. Put the
+procedure's normal report, unchanged, in `fullReportMarkdown`, then copy each of
+its CRITICAL/WARNING/SUGGESTION issues into `findings` with the same severity and
+each check it left not verified or skipped into `notVerified`. Checks the report
+marks Not applicable are not gaps; leave them out of `notVerified`. Each finding needs
+a stable ID, severity, category, title, explanation, locations, and actionable
+recommendation. Do not reclassify issues or rate dimensions for the loop: the
+controller derives the outcome.
 
-Verified checks and resolved findings need concrete evidence. A nonverified or
-not-applicable check needs a reason. Missing evidence is `not_verified`, not
-clean. Every prior finding must have a resolution, even if a fix introduced a
-new issue. External prerequisites are blockers; repairable missing evidence
-goes to the fixer. Never omit unverified checks to obtain a clean verdict.
+Resolved findings need concrete evidence. A `notVerified` entry needs a reason;
+mark it `repairable: false` only for external prerequisites the fixer cannot
+provide, which block the run. Every prior finding must have a resolution, even if
+a fix introduced a new issue. Never omit unverified checks to obtain a clean
+verdict. Failed controller checks become `evidence:<n>` findings for the fixer.
 
 Fixer reports include `outcome`, `addressedFindings`, `unresolvedFindings`,
-`changedFiles`, `checksRun`, `blockers`, and `fullReportMarkdown`. Account for
-every supplied finding exactly once, with evidence for addressed findings and
-reasons for unresolved findings. Check commands are argument arrays with a
+`disputedFindings`, `changedFiles`, `checksRun`, `blockers`, and
+`fullReportMarkdown`. Account for every supplied finding exactly once, with
+evidence for addressed or disputed findings and reasons for unresolved findings.
+A dispute is decided by the next fresh verifier. Check commands are argument arrays with a
 working directory, exit code, evidence, and summary. Completed fixes have no
 unresolved findings, blockers, or failed checks. A fixer cannot declare the loop
 clean; a new full verifier must do that.

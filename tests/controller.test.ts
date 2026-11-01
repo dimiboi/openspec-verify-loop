@@ -7,7 +7,7 @@ import { configSchema } from '../src/config.js';
 import { RunStore, loadRun } from '../src/state.js';
 import { selectTarget } from '../src/openspec.js';
 import { command, exists } from '../src/util.js';
-import { fixtureConfig, fixture, FakeAdapter, verifier, fixer, findings } from './fixtures.js';
+import { fixtureConfig, fixture, FakeAdapter, verifier, fixer, findings, priorIds, resolveAll } from './fixtures.js';
 
 test('clean first verifier saves evidence and never creates a fixer',async t=>{
   const f=await fixture();t.after(()=>rm(f.base,{recursive:true,force:true}));
@@ -35,7 +35,7 @@ test('full verify/fix/verify passes every severity and uses three fresh sessions
       await writeFile(join(f.project,'greet.mjs'),'export function greet(name) { return `Hello, ${name}!`; }\n');
       return {status:'completed',text:JSON.stringify(fixer(a)),messageId:'fix'};
     }
-    const r=a.round===1?verifier(a,{outcome:'findings',findings}):verifier(a,{priorFindingResolutions:findings.map(f=>({findingId:f.id,status:'resolved',evidence:['greet.mjs and passing test'],reason:''}))});
+    const r=a.round===1?verifier(a,{outcome:'findings',findings}):verifier(a,{priorFindingResolutions:resolveAll(a)});
     return {status:'completed',text:JSON.stringify(r),messageId:`verify-${a.round}`};
   });
   const originModel = {providerID:'lmstudio',id:'recursivesi/flint',variant:'default'};
@@ -52,10 +52,21 @@ test('full verify/fix/verify passes every severity and uses three fresh sessions
   assert.match(await readFile(join(s.runDir,'final.md'),'utf8'),/verifier: lmstudio\/recursivesi\/flint#default/);
   assert.equal(await readFile(join(f.project,'unrelated.txt'),'utf8'),'preserve me');
 });
-test('independent failing check rejects a claimed clean result',async t=>{
+test('independent failing check turns a claimed clean result into repair work',async t=>{
   const f=await fixture({broken:true});t.after(()=>rm(f.base,{recursive:true,force:true}));
-  const s=await createRun(f.project,fixtureConfig({stateDir:f.stateDir,checks:[{id:'test',command:['node','--test','greet.test.mjs']}]}),new FakeAdapter(),undefined,{lockRoot:f.lockRoot});
-  assert.equal(s.phase,'failed');assert.match(s.reason!,/independent evidence/);
+  const adapter=new FakeAdapter(async a=>{
+    if(a.role==='fixer') {
+      assert.deepEqual(priorIds(a),['evidence:required-check-test-failed-node-test-greet-test-mjs']);
+      await writeFile(join(f.project,'greet.mjs'),'export function greet(name) { return `Hello, ${name}!`; }\n');
+      return {status:'completed',text:JSON.stringify(fixer(a)),messageId:'fix'};
+    }
+    return {status:'completed',text:JSON.stringify(verifier(a,{priorFindingResolutions:resolveAll(a)})),messageId:`verify-${a.round}`};
+  });
+  const s=await createRun(f.project,fixtureConfig({stateDir:f.stateDir,checks:[{id:'test',command:['node','--test','greet.test.mjs']}]}),adapter,undefined,{lockRoot:f.lockRoot,pollMs:1});
+  assert.equal(s.phase,'clean',s.reason ?? '');
+  assert.deepEqual(adapter.seen.map(a=>a.role),['verifier','fixer','verifier']);
+  const first=JSON.parse(await readFile(join(s.runDir,'rounds/001/verifier.json'),'utf8'));
+  assert.equal(first.report.outcome,'findings');
 });
 test('verifier source mutation invalidates the outcome',async t=>{
   const f=await fixture();t.after(()=>rm(f.base,{recursive:true,force:true}));

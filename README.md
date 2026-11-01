@@ -65,10 +65,16 @@ commit, archive, sync specs, push, merge, or deploy.
 ## Completion and permissions
 
 Clean requires a fresh complete verifier with zero critical findings, warnings,
-suggestions, or applicable unverified checks. Every prior finding needs an
+suggestions, or checks the procedure left unverified. Every prior finding needs an
 explicit resolution with evidence. Independent OpenSpec validation and configured
-checks must pass against the reviewed workspace. A fixer's completion claim cannot
-make the run clean. Justified not-applicable checks are allowed.
+checks must pass against the reviewed workspace; a failing one becomes a critical
+finding for the next fixer. A fixer's completion claim cannot make the run clean.
+
+The verifier returns the verification procedure's own report and copies its issues
+and unverified checks unchanged; the plugin derives the outcome, so the verifier
+never maps review dimensions onto loop statuses. A fixer may dispute an incorrect
+finding with evidence; the next fresh verifier decides it, and two fix cycles
+without workspace changes stop the run as blocked.
 
 Verifier prompts include the pinned verification procedure once. Fixers receive
 the complete issue list and relevant task/check context; subsequent verifiers
@@ -124,6 +130,8 @@ Selections and variants are pinned for the run; changing the chat's selected
 model does not change existing workers or resumed runs. Status, start results,
 and final reports include both worker models. Unavailable models fail without substitution.
 
+Configure `checks` for tests, lint, and builds: the plugin runs them itself and
+keeps their real exit codes, while verifier shell commands need approval.
 Check commands are argument arrays executed without a shell before each verifier.
 `cwd` defaults to the consuming checkout and must remain inside it; `timeoutMs`
 defaults to 120000. Exit codes and output are saved. Ignore generated outputs:

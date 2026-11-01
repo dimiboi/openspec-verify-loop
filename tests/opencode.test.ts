@@ -8,7 +8,7 @@ import { OpenCodeAdapter, parseModel, assertHostingServer, resolveOriginModel, t
 const a: Assignment={sessionId:'ses_a',inputId:'msg_a',runId:'run_a',role:'verifier',round:1,agent:'verifier',project:'/tmp/project',
   model:{providerID:'fake',id:'test'},permissions:workerPermissions('verifier'),prompt:'verify'};
 function adapterWith(options: {messages?:unknown[]; forms?:unknown[];permissions?:unknown[];outcome?:string;busy?:number;idle?:number;finish?:string;variant?:string}={}) {
-  let submissions=0;
+  let submissions=0,listed=0;
   const messages=options.messages ?? [
     {type:'user',id:a.inputId,text:a.prompt,time:{created:1}},
     {type:'assistant',id:'answer',agent:a.agent,model:{...a.model,...(options.variant?{variant:options.variant}:{})},finish:options.finish ?? 'stop',time:{created:2,completed:3},content:[{type:'text',text:'{}'}]},
@@ -18,9 +18,9 @@ function adapterWith(options: {messages?:unknown[]; forms?:unknown[];permissions
     session:{get:async()=>({agent:a.agent,model:a.model,location:{directory:a.project},metadata:{openspecVerifyLoop:a.runId,inputId:a.inputId},permissions:workerPermissions(a.role),outcome:options.outcome??'succeeded',time:{busy:options.busy??1,idle:options.idle??4}}),
       inbox:{list:async()=>[]},prompt:async()=>{submissions++;},
       form:{list:async()=>options.forms??[],get:async()=>({state:{status:'pending'}})}},
-    message:{list:async()=>({data:messages,cursor:{}})},permission:{list:async()=>options.permissions??[]},
+    message:{list:async()=>{listed++;return {data:messages,cursor:{}};}},permission:{list:async()=>options.permissions??[]},
   } as unknown as OpenCodeClient;
-  return {adapter:new OpenCodeAdapter(client),submissions:()=>submissions};
+  return {adapter:new OpenCodeAdapter(client),submissions:()=>submissions,listed:()=>listed};
 }
 test('model references preserve nested model IDs and explicit variants',()=>{
   assert.deepEqual(parseModel('openrouter/vendor/model#high'),{providerID:'openrouter',id:'vendor/model',variant:'high'});
@@ -77,7 +77,9 @@ test('collects only a completed response for the expected worker input',async()=
   assert.equal((await adapterWith({outcome:'failed'}).adapter.observe(a)).status,'failed');
   assert.equal((await adapterWith({finish:'length'}).adapter.observe(a)).status,'failed');
   assert.equal((await adapterWith({variant:'different'}).adapter.observe(a)).status,'failed');
-  assert.equal((await adapterWith({busy:10,idle:4}).adapter.observe(a)).status,'running');
+  const busy=adapterWith({busy:10,idle:4});
+  assert.equal((await busy.adapter.observe(a)).status,'running');
+  assert.equal(busy.listed(),0,'a busy worker poll does not download the transcript');
   await assert.rejects(adapterWith({messages:[{type:'user',id:'different'}]}).adapter.observe(a),/Unexpected worker input/);
 });
 test('permission requests and questions become visible awaiting-input outcomes',async()=>{

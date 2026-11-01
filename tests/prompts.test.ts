@@ -10,7 +10,7 @@ import type { Evidence } from '../src/openspec.js';
 import type { CommandResult } from '../src/util.js';
 
 const findingMarker = 'All prior/unresolved findings requiring disposition (none may be dropped):';
-const verifierMarker = 'Latest verification checks and resolutions (findings are supplied once above; check prior evidence against the current workspace):';
+const verifierMarker = 'Latest verification gaps and resolutions (findings are supplied once above; check prior evidence against the current workspace):';
 const fixerMarker = 'Latest fixer dispositions (claims require independent verification):';
 const evidenceMarker = "Controller's independent current check evidence (failures/incomplete tasks prevent clean; excerpts retain actual exit status; full output is saved):";
 const reportMarker = 'Complete JSON, Markdown, and raw reports remain saved at these paths; consult them for additional detail:';
@@ -32,32 +32,30 @@ async function promptState(t: TestContext) {
   const snapshot = {hash:'reviewed-workspace',head:'checkout-head',files:{'src/greet.ts':'source-hash'}};
   const model = {providerID:'fake',id:'test'};
   const state: RunState = {
-    schemaVersion:2,pluginVersion:'0.2.1',runId:'run_a',project,runDir:join(base,'state/run_a'),
+    schemaVersion:2,pluginVersion:'0.3.0',runId:'run_a',project,runDir:join(base,'state/run_a'),
     config:configSchema.parse({checks:[{id:'tests',command:['node','--test']},{id:'types',command:['npm','run','typecheck']}]}),
     pins:{project,changeName:'add-greeting',targetPath:join(project,'openspec/changes/add-greeting'),root:project,schema:'spec-driven',
       openspecVersion:'1.16.0',procedurePath,procedureDigest:'pinned-procedure-resources',scopeDigest:'scope',workerPolicyDigest:'worker-policy',
       configDigest:'config',projectConfigDigest:'project-config',trackingPaths:[],agents:{verifier:'build',fixer:'build'},
       models:{verifier:model,fixer:model},permissions:{verifier:[],fixer:[]}},
-    phase:'verifying',nextRole:'verifier',round:7,createdAt:0,updatedAt:0,activeMs:0,initial:snapshot,stalledCycles:0,workers:[],
+    phase:'verifying',nextRole:'verifier',round:7,createdAt:0,updatedAt:0,activeMs:0,stalledCycles:0,workers:[],
     prior:['critical','warning','suggestion'].map((severity,index)=>({id:`F${index+1}`,severity:severity as 'critical'|'warning'|'suggestion',
       category:'correctness',title:`Finding ${index+1}`,explanation:`Requirement mismatch ${index+1}`,
       locations:[`src/greet.ts:${index+1}`],recommendation:`Required action ${index+1}`})),
     taskContext:{state:'all_done',progress:{remaining:0},contextFiles:{tasks:[join(project,'openspec/changes/add-greeting/tasks.md')]},
       context:'Keep named greetings deterministic.',operationGuidance:'Follow the approved task context.'},
   };
-  const identity = {schemaVersion:1 as const,runId:state.runId,round:3,changeName:state.pins.changeName,targetPath:state.pins.targetPath};
+  const identity = {schemaVersion:2 as const,runId:state.runId,round:3,changeName:state.pins.changeName,targetPath:state.pins.targetPath};
   state.verifier = {...identity,role:'verifier',verificationComplete:true,outcome:'findings',findings:structuredClone(state.prior),
-    checks:[...['completeness','correctness','coherence'].map(id=>({id,description:id,status:'verified' as const,evidence:[`${id} evidence`],reason:''})),
-      {id:'integration',description:'Integration behavior',status:'not_verified',evidence:['Existing scenario evidence'],reason:'Needs repaired fixture'},
-      {id:'browser',description:'Browser behavior',status:'not_applicable',evidence:[],reason:'Library has no browser interface'}],
+    notVerified:[{check:'Integration behavior',reason:'Needs repaired fixture',repairable:true}],
     priorFindingResolutions:[{findingId:'F1',status:'unresolved',evidence:['Observed failing scenario'],reason:'Still present'}],
     blockers:[],fullReportMarkdown:'# Complete verifier report'};
   state.fixer = {...identity,role:'fixer',outcome:'completed',
     addressedFindings:state.prior.map(finding=>({findingId:finding.id,evidence:[`${finding.locations[0]} implementation and passing focused test`]})),
-    unresolvedFindings:[],changedFiles:['src/greet.ts'],
+    unresolvedFindings:[],disputedFindings:[],changedFiles:['src/greet.ts'],
     checksRun:[{command:['node','--test'],workingDirectory:project,exitCode:0,evidence:['Three tests passed'],summary:'All greeting scenarios passed'}],
     blockers:[],fullReportMarkdown:'# Complete fixer report'};
-  return {state,procedure};
+  return {state,procedure,snapshot};
 }
 
 test('verifier uses one loaded procedure and fixer keeps task context without loading it', async t => {
@@ -69,7 +67,12 @@ test('verifier uses one loaded procedure and fixer keeps task context without lo
   assert(prompt.includes(state.pins.procedureDigest));
   assert(prompt.includes('already loaded'));
   assert(prompt.includes('do not rediscover or reread its entrypoint'));
-  assert(prompt.includes('Review committed implementation even when git status is clean'));
+  assert(prompt.includes('review committed implementation even when git status is clean'));
+  assert(prompt.includes('give every new finding an ID that differs from all prior finding IDs'));
+  assert(prompt.includes('normal report, unchanged'));
+  assert(prompt.includes('Checks the report marks Not applicable are not gaps; leave them out of notVerified.'));
+  // The verifier copies the procedure's issues; it must not map review dimensions into loop statuses.
+  for (const removed of ['completeness, correctness, coherence','aggregate checks','"clean","findings","blocked"','"not_verified"']) assert(!prompt.includes(removed),removed);
   await rm(state.pins.procedurePath);
   const fixing = await workerPrompt(state,'fixer');
   assert(!fixing.includes(procedure));
@@ -77,6 +80,9 @@ test('verifier uses one loaded procedure and fixer keeps task context without lo
   assert(fixing.includes(state.pins.procedurePath));
   assert(fixing.includes('Keep named greetings deterministic.'));
   assert.deepEqual(section(fixing,findingMarker),state.prior);
+  for (const expected of ['disputedFindings','reopen the choice only when a check gives new evidence','do not rediscover them']) {
+    assert(fixing.includes(expected),expected);
+  }
 });
 
 test('compact handoffs preserve all issues, checks, and resolution evidence independently of report verbosity', async t => {
@@ -91,7 +97,7 @@ test('compact handoffs preserve all issues, checks, and resolution evidence inde
   assert.equal(fixing,originalFixing);
   for (const prompt of [verifying,fixing]) {
     assert.deepEqual(section(prompt,findingMarker),state.prior);
-    assert.deepEqual(section(prompt,verifierMarker).checks,state.verifier!.checks);
+    assert.deepEqual(section(prompt,verifierMarker).notVerified,state.verifier!.notVerified);
     assert.deepEqual(section(prompt,verifierMarker).priorFindingResolutions,state.verifier!.priorFindingResolutions);
     assert(!prompt.includes('MARKDOWN_ONLY'));
     const paths = section(prompt,reportMarker);
@@ -114,16 +120,16 @@ test('compact handoffs preserve all issues, checks, and resolution evidence inde
 });
 
 test('large check logs yield bounded excerpts while keeping every command, actual failure status, and workspace evidence', async t => {
-  const {state} = await promptState(t);
+  const {state,snapshot} = await promptState(t);
   const result = (command: string[],exitCode: number,stdout: string,stderr = ''): CommandResult =>
     ({command,workingDirectory:state.project,exitCode,stdout,stderr});
   const noise = (length: number) => `OUTPUT_HEAD\n${'output-only-noise '.repeat(length)}\nOUTPUT_TAIL`;
-  const evidence: Evidence = {before:state.initial,after:state.initial,apply:state.taskContext!,
+  const evidence: Evidence = {before:snapshot,after:snapshot,apply:state.taskContext!,
     validation:result(['openspec','validate','add-greeting','--strict'],0,'Strict validation passed'),
     checks:[result(['node','--test'],7,noise(100_000),noise(100_000)),result(['npm','run','typecheck'],0,'Types passed')]};
   const prompt = await workerPrompt(state,'verifier',evidence);
   const projected = section(prompt,evidenceMarker);
-  assert.equal(projected.workspace,state.initial.hash);
+  assert.equal(projected.workspace,snapshot.hash);
   assert.equal(projected.checksPath,join(state.runDir,'rounds/007/checks.json'));
   assert.deepEqual(projected.apply,state.taskContext);
   assert.equal(projected.validation.exitCode,0);

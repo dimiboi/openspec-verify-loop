@@ -96,7 +96,7 @@ test('cancellation after accepted verification preserves findings without implyi
   assert.equal(adapter.interrupts,0); assert.equal(result.pending,undefined);
 });
 
-test('midrun variant disappearance fails before fixer dispatch and preserves the accepted verifier', async t => {
+test('midrun variant disappearance fails at the next pin check and preserves the accepted verifier', async t => {
   const f = await fixture(); t.after(() => rm(f.base,{recursive:true,force:true}));
   const adapter = new FakeAdapter(withFindings), catalog = await adapter.catalog(f.project);
   let missing = false;
@@ -105,11 +105,12 @@ test('midrun variant disappearance fails before fixer dispatch and preserves the
     lockRoot:f.lockRoot,emit:event => {if((event as {event?:string}).event === 'findings') missing = true;},
   });
   const result = await assertConsistent(state);
+  // Pins were checked right after the verifier, so the change surfaces at the fixer's post-worker check.
   assert.equal(result.outcome,'blocked'); assert.equal(result.progress.verifier.accepted,1);
-  assert.equal(result.progress.fixer.prepared,0); assert.deepEqual(result.unresolvedFindings,findings);
-  assert.equal(result.failure.role,'fixer'); assert.equal(result.failure.stage,'checking_pins');
+  assert.deepEqual(result.progress.fixer,{prepared:1,submitted:1,completed:1,accepted:0}); assert.deepEqual(result.unresolvedFindings,findings);
+  assert.equal(result.failure.role,'fixer'); assert.equal(result.failure.stage,'checking_worker_pins');
   assert.match(result.failure.error,/Unavailable verifier model fake\/test#medium/);
-  assert.equal(result.pending,undefined); assert.equal(adapter.submissions,1);
+  assert.equal(result.pending,undefined); assert.equal(adapter.submissions,2);
 });
 
 test('post-worker pin failure keeps raw completion separate from report acceptance', async t => {

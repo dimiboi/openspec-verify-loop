@@ -4,7 +4,7 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { createRun } from '../src/controller.js';
 import { digest } from '../src/util.js';
-import { FakeAdapter, findings, fixture, fixtureConfig, fixer, verifier } from './fixtures.js';
+import { FakeAdapter, findings, fixture, fixtureConfig, fixer, resolveAll, verifier } from './fixtures.js';
 
 test('large valid reports and check logs stay on disk throughout a complete repair loop', async t => {
   const f = await fixture({broken: true});
@@ -19,9 +19,7 @@ test('large valid reports and check logs stay on disk throughout a complete repa
     }
     const report = assignment.round === 1
       ? verifier(assignment, {outcome: 'findings', findings, fullReportMarkdown: markdown})
-      : verifier(assignment, {priorFindingResolutions: findings.map(finding => ({
-        findingId: finding.id, status: 'resolved', evidence: ['greet.mjs:1 and current passing tests'], reason: '',
-      }))});
+      : verifier(assignment, {priorFindingResolutions: resolveAll(assignment)});
     return {status: 'completed', messageId: `verify-${assignment.round}`, text: JSON.stringify(report)};
   });
   const state = await createRun(f.project, fixtureConfig({stateDir: f.stateDir, checks: [{

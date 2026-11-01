@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { appendFile, mkdir, readFile, rename, rm, writeFile, realpath } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
-import { contained, digest, exists, LoopError, VERSION, type Snapshot } from './util.js';
+import { contained, digest, exists, LoopError, type Snapshot } from './util.js';
 import type { Assignment } from './opencode.js';
 import type { Config } from './config.js';
 import type { Pins, Evidence } from './openspec.js';
@@ -12,7 +12,7 @@ import type { Finding, FixerReport, VerifierReport } from './reports.js';
 export type Phase = 'preflight' | 'verifying' | 'fixing' | 'clean' | 'awaiting_input' | 'blocked' | 'failed' | 'interrupted' | 'limited';
 export type Pending = {
   assignment: Assignment; stage: 'prepared' | 'created' | 'admitting' | 'submitted';
-  before: Snapshot; evidence?: Evidence;
+  before: Snapshot; evidenceFailures?: string[];
 };
 export type WorkerProgress = 'prepared' | 'submitted' | 'completed' | 'accepted';
 export type Worker = {
@@ -30,8 +30,8 @@ export type RunState = {
   createdAt: number; updatedAt: number; activeMs: number; executor?: {pid: number; runtimeId: string};
   pending?: Pending; prior: Finding[]; verifier?: VerifierReport; fixer?: FixerReport;
   taskContext?: Evidence['apply'];
-  stalledCycles: number; lastFixFingerprint?: string; lastFixWorkspace?: string;
-  reason?: string; failure?: FailureContext; finalizationFailure?: FailureContext; requests?: unknown[]; initial: Snapshot;
+  stalledCycles: number;
+  reason?: string; failure?: FailureContext; finalizationFailure?: FailureContext; requests?: unknown[];
   workers: Worker[];
 };
 export function defaultStateRoot() {
@@ -177,7 +177,7 @@ export class RunStore {
 
 export async function loadRun(runDir: string, project: string): Promise<RunState> {
   const value = JSON.parse(await readFile(join(runDir, 'state.json'), 'utf8')) as RunState;
-  if (value.schemaVersion !== 2 || value.pluginVersion !== VERSION || value.project !== project || value.runDir !== runDir ||
+  if (value.schemaVersion !== 2 || value.project !== project || value.runDir !== runDir ||
       value.pins?.project !== project || !Number.isInteger(value.round) || value.round < 1 || !Array.isArray(value.prior)) {
     throw new Error('Incompatible or invalid saved run state');
   }

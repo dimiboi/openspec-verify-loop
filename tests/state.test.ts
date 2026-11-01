@@ -5,7 +5,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { atomicWrite, ensureExternalState, RunStore, type RunState } from '../src/state.js';
 import { createRun, stopRun, resumeRun } from '../src/controller.js';
-import { fixtureConfig, fixture, FakeAdapter } from './fixtures.js';
+import { RunManager } from '../src/manager.js';
+import { fixtureConfig, fixture, FakeAdapter, verifier } from './fixtures.js';
 
 test('atomic writes keep state readable and replace the whole document',async t=>{
   const dir=await mkdtemp(join(tmpdir(),'loop-state-'));t.after(()=>rm(dir,{recursive:true,force:true}));
@@ -55,4 +56,29 @@ test('a crash after saving clean can release its reservation without losing the 
   assert.equal(recovered.phase,'clean');
   assert.equal(JSON.parse(await readFile(join(s.runDir,'final.json'),'utf8')).outcome,'clean');
   assert.equal((await createRun(f.project,s.config,new FakeAdapter(),undefined,{lockRoot:f.lockRoot})).phase,'clean');
+});
+test('stopping a finished run keeps its original outcome',async t=>{
+  const f=await fixture();t.after(()=>rm(f.base,{recursive:true,force:true}));
+  const adapter=new FakeAdapter(a=>({status:'completed',text:JSON.stringify(verifier(a,{outcome:'blocked',blockers:['missing credentials']})),messageId:'final'}));
+  const s=await createRun(f.project,fixtureConfig({stateDir:f.stateDir}),adapter,undefined,{lockRoot:f.lockRoot});
+  assert.equal(s.phase,'blocked');
+  const stopped=await stopRun(new RunStore(s,f.lockRoot),adapter);
+  assert.equal(stopped.phase,'blocked');assert.equal(stopped.reason,'missing credentials');
+  assert.equal(JSON.parse(await readFile(join(s.runDir,'final.json'),'utf8')).reason,'missing credentials');
+});
+test('runs from an older plugin version stay listable and stoppable but not resumable',async t=>{
+  const f=await fixture();t.after(()=>rm(f.base,{recursive:true,force:true}));
+  const config=fixtureConfig({stateDir:f.stateDir});
+  const adapter=new FakeAdapter(()=>({status:'awaiting_input',requests:[{id:'request'}]}));
+  const s=await createRun(f.project,config,adapter,undefined,{lockRoot:f.lockRoot});
+  assert(s.pending);
+  await atomicWrite(join(s.runDir,'state.json'),{...s,pluginVersion:'0.0.1'});
+  await atomicWrite(join(s.runDir,'..','run_ff','state.json'),{broken:true});
+  const manager=new RunManager({lockRoot:f.lockRoot});t.after(()=>manager.close());
+  const listed=(await manager.status(f.project,config) as {runs:{runId:string;outcome:string}[]}).runs;
+  assert.deepEqual(listed.map(run=>[run.runId,run.outcome]),[[s.runId,'awaiting_input'],['run_ff','unreadable']]);
+  await assert.rejects(manager.resume(f.project,config,adapter,s.runId,'parent'),/created by plugin 0\.0\.1/);
+  await assert.rejects(manager.resume(f.project,fixtureConfig({stateDir:f.stateDir,maxRounds:3}),adapter,s.runId,'parent'),/created by plugin 0\.0\.1/);
+  assert.equal((await manager.stop(f.project,config,adapter,s.runId)).outcome,'interrupted');
+  assert.equal((await createRun(f.project,config,new FakeAdapter(),undefined,{lockRoot:f.lockRoot})).phase,'clean');
 });

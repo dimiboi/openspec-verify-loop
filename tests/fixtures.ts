@@ -45,16 +45,22 @@ export async function fixture(options: {realSkill?: boolean; broken?: boolean; r
 }
 
 export function verifier(a: Assignment, overrides: Partial<VerifierReport> = {}): VerifierReport {
-  return {schemaVersion:1,runId:a.runId,round:a.round,changeName:'add-greeting',targetPath:join(a.project,'openspec/changes/add-greeting'),
-    role:'verifier',verificationComplete:true,outcome:'clean',findings:[],
-    checks:['completeness','correctness','coherence'].map(id=>({id,description:id,status:'verified',evidence:['greet.mjs and passing Node test'],reason:''})),
+  return {schemaVersion:2,runId:a.runId,round:a.round,changeName:'add-greeting',targetPath:join(a.project,'openspec/changes/add-greeting'),
+    role:'verifier',verificationComplete:true,outcome:'clean',findings:[],notVerified:[],
     priorFindingResolutions:[],blockers:[],fullReportMarkdown:'# Complete verification\nAll three dimensions verified; no findings.',...overrides};
 }
+/** The prior findings handed to a worker, including controller-added evidence findings. */
+export function priorIds(a: Assignment): string[] {
+  return JSON.parse(a.prompt.split('All prior/unresolved findings requiring disposition (none may be dropped):\n')[1]!.split('\n\n')[0]!).map((f: {id: string}) => f.id);
+}
+export function resolveAll(a: Assignment): VerifierReport['priorFindingResolutions'] {
+  return priorIds(a).map(findingId => ({findingId, status: 'resolved' as const, evidence: ['greet.mjs:1 and current passing tests'], reason: ''}));
+}
 export function fixer(a: Assignment, overrides: Partial<FixerReport> = {}): FixerReport {
-  const findings = JSON.parse(a.prompt.split('All prior/unresolved findings requiring disposition (none may be dropped):\n')[1]!.split('\n\n')[0]!);
-  return {schemaVersion:1,runId:a.runId,round:a.round,changeName:'add-greeting',targetPath:join(a.project,'openspec/changes/add-greeting'),
+  const findings = priorIds(a).map(id => ({id}));
+  return {schemaVersion:2,runId:a.runId,round:a.round,changeName:'add-greeting',targetPath:join(a.project,'openspec/changes/add-greeting'),
     role:'fixer',outcome:'completed',addressedFindings:findings.map((f:{id:string})=>({findingId:f.id,evidence:['Updated greet.mjs and ran the Node test']})),
-    unresolvedFindings:[],changedFiles:['greet.mjs'],checksRun:[{command:['node','--test','greet.test.mjs'],workingDirectory:a.project,exitCode:0,evidence:['Node test passed'],summary:'Pass'}],
+    unresolvedFindings:[],disputedFindings:[],changedFiles:['greet.mjs'],checksRun:[{command:['node','--test','greet.test.mjs'],workingDirectory:a.project,exitCode:0,evidence:['Node test passed'],summary:'Pass'}],
     blockers:[],fullReportMarkdown:'# Fix outcome\nFixed the greeting and verified the test.',...overrides};
 }
 export const findings = ['critical','warning','suggestion'].map((severity,i)=>({id:`F${i+1}`,severity:severity as 'critical'|'warning'|'suggestion',

@@ -12,7 +12,8 @@ against deterministic host/worker adapters, and validates the package export and
 bundled skill. Fixtures use Git and OpenSpec locally; no OpenCode session, model
 request, or native plugin installation is performed.
 
-Coverage includes report completeness and contradictions, all severities, prior
+Coverage includes report completeness, controller-derived outcomes, fixer
+disputes, failed checks becoming repair findings, all severities, prior
 resolutions, independent checks, source/HEAD changes, procedure/configuration
 pins, fresh sessions, limits/stalls, unknown admission, cancellation, concurrent
 ownership, same-process generation handover, and pending-worker cleanup.
@@ -74,6 +75,13 @@ For GitHub installation, use a pushed ref that contains the plugin entrypoint.
    issue and the fixer's dispositions. After a failed or interrupted run, compare
    status, the completion notice, and `final.json`/`final.md`: completed and accepted
    work, remaining findings, failure stage, and report paths should agree.
+9. Watch worker transcripts with a small local model on a UI change. The
+   verifier's `fullReportMarkdown` should be the procedure's own report, and its
+   final turn should not debate how to map dimensions or severities. The fixer
+   should edit and run a check soon after reading the finding locations, settling
+   layout or library questions with a test, docs, or browser tool rather than
+   repeated "final" decisions. Neither worker should reread whole large files once
+   line references are known, or inspect other sessions or loop state.
 
 The supported target is a repo-local OpenSpec root at one Git checkout root.
 Permissions are not a filesystem sandbox. Unknown admission and unconfirmed

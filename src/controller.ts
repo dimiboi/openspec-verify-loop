@@ -4,9 +4,9 @@ import { mkdir, readFile, rm } from 'node:fs/promises';
 import type { Adapter, Assignment, Model } from './opencode.js';
 import { checkPins, evidenceFailures, gatherEvidence, pinTarget, selectTarget, type Evidence } from './openspec.js';
 import type { Config } from './config.js';
-import { needsRepair, parseReport, type Finding } from './reports.js';
+import { needsRepair, parseReport } from './reports.js';
 import { atomicWrite, defaultStateRoot, ensureExternalState, newId, RunStore, runDirectory, type ReservationIdentity, type RunState } from './state.js';
-import { changedFiles, delay, digest, errorMessage, LoopError, snapshot, VERSION } from './util.js';
+import { changedFiles, delay, errorMessage, LoopError, snapshot, VERSION } from './util.js';
 import { workerPrompt } from './prompts.js';
 import { runSummary, summaryMarkdown } from './summary.js';
 
@@ -30,8 +30,7 @@ export async function prepareRun(project: string, config: Config, adapter: Adapt
   const root = await ensureExternalState(config.stateDir ?? defaultStateRoot(), project, resolve(dirname(fileURLToPath(import.meta.url)),'..'));
   const runId = newId('run');
   const runDir = runDirectory(root, project, runId);
-  const initial = await snapshot(project);
-  const state: RunState = {schemaVersion:2,pluginVersion:VERSION,originSessionId:options.originSessionId,runId,runDir,project,config,pins,initial,
+  const state: RunState = {schemaVersion:2,pluginVersion:VERSION,originSessionId:options.originSessionId,runId,runDir,project,config,pins,
     phase:'preflight',nextRole:'verifier',round:1,createdAt:Date.now(),updatedAt:Date.now(),activeMs:0,
     prior:[],stalledCycles:0,workers:[]};
   const store = new RunStore(state, options.lockRoot, options.runtimeId);
@@ -41,11 +40,6 @@ export async function prepareRun(project: string, config: Config, adapter: Adapt
 }
 export async function createRun(project: string, config: Config, adapter: Adapter, change?: string, options: LoopOptions = {}) {
   return executeLoop(await prepareRun(project, config, adapter, change, options), adapter, options);
-}
-function findingsFingerprint(findings: Finding[]) {
-  // IDs and wording are model-owned; categories, affected locations, and severities are a stable comparison aid.
-  return digest(JSON.stringify(findings.map(f => ({severity:f.severity,category:f.category.toLowerCase(),locations:[...f.locations].sort()}))
-    .sort((a,b)=>JSON.stringify(a).localeCompare(JSON.stringify(b)))));
 }
 export async function executeLoop(store: RunStore, adapter: Adapter, options: LoopOptions = {}): Promise<RunState> {
   const s = store.state;
@@ -83,13 +77,16 @@ export async function executeLoop(store: RunStore, adapter: Adapter, options: Lo
     delete s.reason; delete s.failure; delete s.finalizationFailure; delete s.requests;
     emit({event:'started',runId:s.runId,runDir:s.runDir,change:s.pins.changeName,models:s.pins.models});
     await checkPins(s.pins, s.config, adapter);
+    // Set only directly after a pin check; cleared before any dispatch so waits/resumes always re-check.
+    let pinsFresh = true;
     while (true) {
       at('before_dispatch');
       await guard();
       if (!s.pending) {
         if (s.config.maxRounds && s.round > s.config.maxRounds) throw new LoopError('limited', 'Verification round limit reached');
         at('checking_pins');
-        await checkPins(s.pins, s.config, adapter);
+        if (!pinsFresh) await checkPins(s.pins, s.config, adapter);
+        pinsFresh = false;
         const role = s.nextRole;
         at('gathering_evidence');
         const evidence = role === 'verifier' ? await gatherEvidence(s.pins, s.config, workSignal) : undefined;
@@ -103,7 +100,8 @@ export async function executeLoop(store: RunStore, adapter: Adapter, options: Lo
         if (Buffer.byteLength(prompt) > 2 * 1024 * 1024) throw new LoopError('blocked', 'Complete worker context exceeds 2 MiB; reduce report/context size without dropping findings');
         const assignment: Assignment = {sessionId:newId('ses'),inputId:newId('msg'),project:s.project,runId:s.runId,
           role,round:s.round,agent:s.pins.agents[role],model:s.pins.models[role],permissions:s.pins.permissions[role],prompt};
-        s.pending = {assignment,stage:'prepared',before,...(evidence ? {evidence} : {})};
+        // Full check output is in checks.json; the clean decision only needs its failures.
+        s.pending = {assignment,stage:'prepared',before,...(evidence ? {evidenceFailures:evidenceFailures(evidence,s.config.checks.map(c=>c.id))} : {})};
         s.phase = role === 'verifier' ? 'verifying' : 'fixing';
         s.workers.push({sessionId:assignment.sessionId,inputId:assignment.inputId,role,round:s.round,progress:'prepared'});
         await save(); // Write-ahead identity and complete prompt precede all network mutation.
@@ -129,24 +127,20 @@ export async function executeLoop(store: RunStore, adapter: Adapter, options: Lo
         pending.stage = 'submitted'; if (worker) worker.progress = 'submitted'; await save();
       }
       emit({event:'worker',role:a.role,round:a.round,sessionId:a.sessionId,inputId:a.inputId});
-      const progress = new AbortController();
-      const subscription = adapter.subscribe?.(a.sessionId, progress.signal, type => emit({event:'progress',role:a.role,round:a.round,type}));
       let observation;
       at('observing_worker');
-      try {
-        let failures = 0;
-        while (true) {
-          await guard();
-          try { observation = await adapter.observe(a); failures = 0; }
-          catch (e) {
-            if (++failures >= 3) throw new Error(`Cannot reconcile worker after 3 attempts: ${errorMessage(e)}`);
-            emit({event:'reconnecting',attempt:failures});
-            await delay(options.pollMs ?? 1000, workSignal); continue;
-          }
-          if (observation.status !== 'running') break;
-          await delay(options.pollMs ?? 1000, workSignal);
+      let failures = 0;
+      while (true) {
+        await guard();
+        try { observation = await adapter.observe(a); failures = 0; }
+        catch (e) {
+          if (++failures >= 3) throw new Error(`Cannot reconcile worker after 3 attempts: ${errorMessage(e)}`);
+          emit({event:'reconnecting',attempt:failures});
+          await delay(options.pollMs ?? 1000, workSignal); continue;
         }
-      } finally { progress.abort(); await subscription; }
+        if (observation.status !== 'running') break;
+        await delay(options.pollMs ?? 1000, workSignal);
+      }
       if (observation.status === 'awaiting_input') {
         s.requests = observation.requests;
         await terminate('awaiting_input', 'Worker needs permission or user input; answer in its OpenCode session, then explicitly resume this run', true);
@@ -161,10 +155,9 @@ export async function executeLoop(store: RunStore, adapter: Adapter, options: Lo
       await atomicWrite(join(roundDir, `${a.role}.raw.json`), {sessionId:a.sessionId,inputId:a.inputId,messageId:observation.messageId,text:observation.text});
       if (worker) worker.progress = 'completed';
       await save();
-      await persistEvidence(s,a.round,pending.evidence);
-      if(pending.evidence)s.taskContext=pending.evidence.apply;
       at('checking_worker_pins');
       await checkPins(s.pins, s.config, adapter);
+      pinsFresh = true;
       at('checking_workspace');
       const after = await snapshot(s.project);
       await guard();
@@ -174,11 +167,9 @@ export async function executeLoop(store: RunStore, adapter: Adapter, options: Lo
       }
       at('validating_report');
       const report = parseReport(observation.text, a.role, {runId:s.runId,round:a.round,changeName:s.pins.changeName,targetPath:s.pins.targetPath}, s.prior);
-      if (report.role === 'verifier' && report.outcome === 'clean') {
-        at('checking_evidence');
-        const failures = pending.evidence ? evidenceFailures(pending.evidence) : ['No independent check evidence'];
-        if (failures.length) throw new Error(`Clean report contradicts independent evidence: ${failures.join('; ')}`);
-      }
+      const failedEvidence = a.role === 'verifier' ? pending.evidenceFailures ?? ['No independent check evidence'] : [];
+      // Failed controller checks are repair work for the fixer, so they can never certify a clean round.
+      if (report.role === 'verifier' && report.outcome === 'clean' && failedEvidence.length) report.outcome = 'findings';
       at('accepting_report');
       await atomicWrite(join(roundDir, `${a.role}.json`), {sessionId:a.sessionId,inputId:a.inputId,messageId:observation.messageId,workspace:after.hash,report});
       await atomicWrite(join(roundDir, `${a.role}.md`), report.fullReportMarkdown, true);
@@ -186,16 +177,17 @@ export async function executeLoop(store: RunStore, adapter: Adapter, options: Lo
       delete s.pending;
       if (report.role === 'verifier') {
         s.verifier = report;
-        s.prior = needsRepair(report, s.prior);
+        s.prior = needsRepair(report, s.prior, failedEvidence);
       } else s.fixer = report;
       await save();
       await store.event('report_accepted', {role:a.role,round:a.round,messageId:observation.messageId});
       if (report.role === 'verifier') {
         if (report.outcome === 'blocked' || report.blockers.length) {
-          await terminate('blocked', report.blockers.join('; ')); break;
+          await terminate('blocked', [...report.blockers,
+            ...report.notVerified.filter(c => !c.repairable).map(c => `Not verified: ${c.check}: ${c.reason}`)].join('; ')); break;
         }
         if (report.outcome === 'clean') {
-          s.phase = 'clean'; s.reason = 'Fresh full verification has zero findings and all applicable checks are verified';
+          s.phase = 'clean'; s.reason = 'Fresh full verification has zero findings, nothing left unverified, and passing controller checks';
           s.prior = []; await save(); break;
         }
         s.nextRole = 'fixer';
@@ -204,11 +196,9 @@ export async function executeLoop(store: RunStore, adapter: Adapter, options: Lo
         if (report.outcome === 'blocked') {
           await terminate('blocked', [...report.blockers,...report.unresolvedFindings.map(f=>f.reason)].join('; ')); break;
         }
-        const fingerprint = findingsFingerprint(s.prior);
         const unchanged = pending.before.hash === after.hash;
         // Model-owned wording/categories cannot manufacture progress without a workspace change.
         s.stalledCycles = unchanged ? s.stalledCycles + 1 : 0;
-        s.lastFixFingerprint = fingerprint; s.lastFixWorkspace = after.hash;
         s.nextRole = 'verifier'; s.round++;
         if (s.stalledCycles >= 2) { await terminate('blocked', 'Two consecutive fix cycles made no demonstrable progress'); break; }
       }
@@ -263,7 +253,11 @@ export async function executeLoop(store: RunStore, adapter: Adapter, options: Lo
   return s;
 }
 
-export async function prepareResume(store: RunStore, adapter: Adapter, options: LoopOptions = {}) {
+export async function prepareResume(store: RunStore) {
+  // Older runs stay loadable for status and stop, but their saved schema is not resumable.
+  if (store.state.pluginVersion !== VERSION) {
+    throw new LoopError('blocked', `Run was created by plugin ${store.state.pluginVersion}; stop it and start a new run`);
+  }
   await store.acquire(true);
   if (store.state.phase === 'clean') {
     // A crash after persisting clean but before releasing its reservation must remain recoverable.
@@ -279,14 +273,15 @@ export async function prepareResume(store: RunStore, adapter: Adapter, options: 
   return store;
 }
 export async function resumeRun(store: RunStore, adapter: Adapter, options: LoopOptions = {}) {
-  return executeLoop(await prepareResume(store, adapter, options), adapter, options);
+  return executeLoop(await prepareResume(store), adapter, options);
 }
 
 /** An inactive run is recovered under the same checkout lease before cancellation. */
 export async function stopRun(store: RunStore, adapter?: Adapter, expected?: ReservationIdentity) {
   if (!await store.acquire(true,expected)) return store.state;
   try {
-    if(store.state.phase==='clean' && !store.state.pending) {
+    if (!store.state.pending && ['clean','blocked','failed','limited','interrupted'].includes(store.state.phase)) {
+      // A finished run keeps its original outcome; stopping only releases its reservation.
       await persistOutcome(store.state);
       return store.state;
     }
