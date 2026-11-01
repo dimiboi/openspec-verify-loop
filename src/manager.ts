@@ -1,18 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { readdir, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
-import { executeLoop, prepareRun, prepareResume, stopRun, type LoopOptions } from './controller.js';
+import { executeLoop, persistOutcome, prepareRun, prepareResume, stopRun, type LoopOptions } from './controller.js';
 import type { Adapter, Model } from './opencode.js';
 import type { Config } from './config.js';
 import { atomicWrite, defaultStateRoot, loadRun, projectRunsDirectory, runDirectory, RunStore, type RunState } from './state.js';
 import { digest, errorMessage, LoopError } from './util.js';
+import { runSummary } from './summary.js';
 
-export function runSummary(state: RunState) {
-  return {outcome: state.phase, runId: state.runId, runDir: state.runDir, change: state.pins.changeName,
-    round: state.round, reason: state.reason, executor: state.executor, requests: state.requests,
-    pending: state.pending ? {sessionId: state.pending.assignment.sessionId, role: state.pending.assignment.role} : undefined,
-    models: state.pins.models, workers: state.workers, unresolvedFindings: state.prior, reports: join(state.runDir, 'rounds')};
-}
+export { runSummary } from './summary.js';
 type Task = {store: RunStore; abort: AbortController; promise: Promise<void>};
 export type ManagerOptions = Pick<LoopOptions, 'lockRoot' | 'pollMs'> & {
   notify?: (state: RunState) => Promise<void>;
@@ -24,7 +20,7 @@ export class RunManager {
   readonly runtimeId = randomUUID();
   private closed = false;
   private active = new Map<string, Task>();
-  private paused = new Map<string, {state: RunState; adapter: Adapter}>();
+  private paused = new Map<string, {store: RunStore; adapter: Adapter}>();
   private operations = new Set<Promise<unknown>>();
   private closing?: Promise<void>;
   constructor(private options: ManagerOptions = {}) {}
@@ -48,11 +44,23 @@ export class RunManager {
         await executeLoop(store, adapter, {...this.options, signal: abort.signal});
       } catch (error) {
         // Persistence failures must not silently free an uncertain worker's lease.
+        // A failed/uncertain release may already have admitted a successor. No
+        // state or final report from this generation may be written after that.
+        if (!await store.hasLiveOwnership()) return;
         store.state.phase = 'failed'; store.state.reason = errorMessage(error);
+        store.state.executor = {pid:process.pid,runtimeId:store.runtimeId};
+        store.state.finalizationFailure ??= {role:store.state.pending?.assignment.role ?? store.state.nextRole,
+          round:store.state.pending?.assignment.round ?? store.state.round,stage:'finalizing',error:errorMessage(error)};
+        store.state.failure ??= store.state.finalizationFailure;
         await store.event('controller_error', {reason: store.state.reason}).catch(() => {});
         await store.save().catch(() => {});
+        // Storage may have recovered, or only final.md may be unwritable. Rewrite
+        // final.json first so an earlier success cannot outlive the failed state.
+        await persistOutcome(store.state, true).catch(async error => {
+          await store.event('final_report_failed', {reason:errorMessage(error)}).catch(() => {});
+        });
       }
-      if (store.state.pending) this.paused.set(project, {state: store.state, adapter});
+      if (store.state.pending) this.paused.set(project, {store, adapter});
       try { await this.options.notify?.(store.state); }
       catch (error) { await store.event('notice_failed', {reason: errorMessage(error)}).catch(() => {}); }
     }).finally(() => { if (this.active.get(project) === task) this.active.delete(project); });
@@ -130,8 +138,9 @@ export class RunManager {
       const tasks = [...this.active.values()];
       for (const task of tasks) task.abort.abort();
       await Promise.all(tasks.map(task => task.promise));
-      for (const {state, adapter} of this.paused.values()) {
-        try { await stopRun(new RunStore(state, this.options.lockRoot, this.runtimeId), adapter); }
+      for (const {store, adapter} of this.paused.values()) {
+        const state = store.state;
+        try { await stopRun(new RunStore(state, this.options.lockRoot, this.runtimeId), adapter, store.reservationIdentity); }
         catch (error) {
           await new RunStore(state, this.options.lockRoot, this.runtimeId)
             .event('shutdown_reconciliation_failed', {reason: errorMessage(error)}).catch(() => {});

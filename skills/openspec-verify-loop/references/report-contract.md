@@ -31,3 +31,9 @@ clean; a new full verifier must do that.
 
 The controller retains raw output and validated JSON/Markdown reports per round.
 Malformed, truncated, stale, or contradictory reports never advance to clean.
+Handoffs carry complete structured issues, checks, and relevant fix dispositions
+with paths to the full saved reports. Report Markdown and complete command output
+stay on disk; bounded command excerpts always retain the actual exit status.
+The verifier receives the procedure directly and need not rediscover or reload it.
+Evidence from an earlier round does not replace the current round's independent
+checks or a fresh assessment of every prior issue.

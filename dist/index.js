@@ -493,10 +493,10 @@ async function registerCommands(ctx, service, notice) {
 // src/manager.ts
 import { randomUUID as randomUUID2 } from "node:crypto";
 import { readdir as readdir2, realpath as realpath4 } from "node:fs/promises";
-import { join as join4 } from "node:path";
+import { join as join6 } from "node:path";
 
 // src/controller.ts
-import { dirname as dirname4, join as join3, resolve as resolve5 } from "node:path";
+import { dirname as dirname4, join as join5, resolve as resolve5 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { mkdir as mkdir2, rm as rm2 } from "node:fs/promises";
 
@@ -507,11 +507,12 @@ import { dirname, join, resolve as resolve3, relative as relative2, sep as sep2 
 
 // src/workers.ts
 var MANAGEMENT_TOOL = "openspec_verify_loop";
+var promptContextVersion = 2;
 var workerInstructions = {
   verifier: "Perform one inspection assignment. Execute the pinned verification procedure in full. Leave source, task tracking, requirements, and archival state unchanged. Shell access is permission-controlled, not a filesystem sandbox; do not bypass edit restrictions through the shell.",
   fixer: "Address every supplied finding and missing check evidence. Preserve unrelated work and run relevant checks. Do not weaken tests, requirements, or approved scope to manufacture a clean result. Requirements/design decisions and external prerequisites are blockers."
 };
-var commonInstructions = "The controller owns sequencing. Do not launch workers, invoke openspec_verify_loop, commit, push, merge, deploy, sync specs, or archive. Complete only this assignment and return exactly the requested report.";
+var commonInstructions = "The controller owns sequencing. Do not launch workers, invoke openspec_verify_loop, commit, push, merge, deploy, sync specs, or archive. Follow repository instructions. Scope searches to relevant source/tests, read focused ranges, and quote shell globs. Review committed implementation even when git status is clean. Keep lengthy command output in logs outside the checkout; preserve the actual command exit status when limiting displayed output. Complete only this assignment and return exactly the requested report.";
 function workerPermissions(role, base = []) {
   return [
     ...role === "verifier" ? [
@@ -538,6 +539,7 @@ function workerPermissions(role, base = []) {
 function workerPolicyDigest(build) {
   return digest(JSON.stringify({
     version: VERSION,
+    promptContextVersion,
     build,
     workerInstructions,
     commonInstructions,
@@ -924,6 +926,7 @@ async function ensureExternalState(root, project, packageDir) {
   return canonical;
 }
 var lockSchema = z5.object({ runId: z5.string(), runDir: z5.string(), pid: z5.number().int().nullable(), runtimeId: z5.string(), token: z5.string() });
+var matchesReservation = (owner, expected) => owner.runId === expected.runId && owner.runDir === expected.runDir && owner.runtimeId === expected.runtimeId && owner.token === expected.token;
 function alive(pid) {
   try {
     process.kill(pid, 0);
@@ -943,33 +946,67 @@ var RunStore = class {
   lockDir;
   token = randomUUID();
   owns = false;
-  async acquire(resume = false) {
+  get reservationIdentity() {
+    return { runId: this.state.runId, runDir: this.state.runDir, runtimeId: this.runtimeId, token: this.token };
+  }
+  async readOwner() {
+    return lockSchema.parse(JSON.parse(await readFile3(join2(this.lockDir, "owner.json"), "utf8")));
+  }
+  async acquire(resume = false, expected) {
     await mkdir(dirname2(this.lockDir), { recursive: true, mode: 448 });
-    try {
-      await mkdir(this.lockDir, { mode: 448 });
-    } catch (e) {
-      if (e.code !== "EEXIST") throw e;
-      let lock;
+    let existing = Boolean(expected), claimed = false;
+    if (!expected) {
       try {
-        lock = lockSchema.parse(JSON.parse(await readFile3(join2(this.lockDir, "owner.json"), "utf8")));
-      } catch {
-        throw new LoopError("blocked", `Incomplete checkout lock at ${this.lockDir}; inspect it before recovery`);
-      }
-      if (!resume || lock.runId !== this.state.runId || lock.runDir !== this.state.runDir) {
-        throw new LoopError("blocked", `Checkout reserved by ${lock.runId}; explicitly resume or stop it`, { runDir: lock.runDir });
-      }
-      if (lock.pid !== null && alive(lock.pid)) throw new LoopError("blocked", `Controller ${lock.pid} is still running`);
-      try {
-        await writeFile(join2(this.lockDir, "recovery"), this.token, { flag: "wx", mode: 384 });
-      } catch {
-        throw new LoopError("blocked", `Another recovery owns ${this.lockDir}`);
+        await mkdir(this.lockDir, { mode: 448 });
+      } catch (e) {
+        if (e.code !== "EEXIST") throw e;
+        existing = true;
       }
     }
-    this.owns = true;
-    await atomicWrite(join2(this.lockDir, "owner.json"), { runId: this.state.runId, runDir: this.state.runDir, pid: process.pid, runtimeId: this.runtimeId, token: this.token });
-    await rm(join2(this.lockDir, "recovery"), { force: true });
-    this.state.executor = { pid: process.pid, runtimeId: this.runtimeId };
-    await this.save();
+    const ownerPath = join2(this.lockDir, "owner.json");
+    let recoveryPath;
+    try {
+      if (existing) {
+        let lock;
+        try {
+          lock = await this.readOwner();
+        } catch (error) {
+          if (expected && error.code === "ENOENT") return false;
+          throw new LoopError("blocked", `Incomplete checkout lock at ${this.lockDir}; inspect it before recovery`);
+        }
+        if (expected && !matchesReservation(lock, expected)) return false;
+        if (!resume || lock.runId !== this.state.runId || lock.runDir !== this.state.runDir) {
+          throw new LoopError("blocked", `Checkout reserved by ${lock.runId}; explicitly resume or stop it`, { runDir: lock.runDir });
+        }
+        if (lock.pid !== null && alive(lock.pid)) throw new LoopError("blocked", `Controller ${lock.pid} is still running`);
+        recoveryPath = join2(this.lockDir, `recovery-${digest(lock.token)}`);
+        try {
+          await writeFile(recoveryPath, this.token, { flag: "wx", mode: 384 });
+          claimed = true;
+        } catch {
+          throw new LoopError("blocked", `Another recovery owns ${this.lockDir}`);
+        }
+        const current = await this.readOwner();
+        if (!matchesReservation(current, lock) || current.pid !== lock.pid) {
+          if (expected) return false;
+          throw new LoopError("blocked", "Checkout reservation changed during recovery");
+        }
+        if (current.pid !== null && alive(current.pid)) throw new LoopError("blocked", `Controller ${current.pid} is still running`);
+      }
+      this.owns = true;
+      await atomicWrite(ownerPath, { runId: this.state.runId, runDir: this.state.runDir, pid: process.pid, runtimeId: this.runtimeId, token: this.token });
+      if (resume) this.state = await loadRun(this.state.runDir, this.state.project);
+      this.state.executor = { pid: process.pid, runtimeId: this.runtimeId };
+      await this.save();
+      return true;
+    } finally {
+      if (claimed && recoveryPath) {
+        try {
+          if (await readFile3(recoveryPath, "utf8") === this.token) await rm(recoveryPath, { force: true });
+        } catch {
+        }
+      }
+    }
   }
   async ownerPid() {
     const path = join2(this.lockDir, "owner.json");
@@ -979,6 +1016,16 @@ var RunStore = class {
     } catch (e) {
       if (e.code === "ENOENT") return null;
       throw e;
+    }
+  }
+  /** A cached lease is insufficient after an uncertain release or handoff. */
+  async hasLiveOwnership() {
+    if (!this.owns) return false;
+    try {
+      const owner = lockSchema.parse(JSON.parse(await readFile3(join2(this.lockDir, "owner.json"), "utf8")));
+      return owner.token === this.token && owner.runtimeId === this.runtimeId && owner.pid === process.pid && owner.runId === this.state.runId && owner.runDir === this.state.runDir;
+    } catch {
+      return false;
     }
   }
   async save() {
@@ -1015,9 +1062,42 @@ async function loadRun(runDir, project) {
 
 // src/prompts.ts
 import { readFile as readFile4 } from "node:fs/promises";
-import { dirname as dirname3 } from "node:path";
+import { dirname as dirname3, join as join3 } from "node:path";
+var outputExcerptLength = 2400;
+function outputExcerpt(output) {
+  const omittedCharacters = Math.max(0, output.length - outputExcerptLength);
+  return { text: omittedCharacters ? `${output.slice(0, outputExcerptLength / 2)}
+[Output omitted; see the saved checks.json.]
+${output.slice(-outputExcerptLength / 2)}` : output, omittedCharacters };
+}
+function commandEvidence(result) {
+  return {
+    command: result.command,
+    workingDirectory: result.workingDirectory,
+    exitCode: result.exitCode,
+    status: result.exitCode === 0 ? "passed" : "failed",
+    stdout: outputExcerpt(result.stdout),
+    stderr: outputExcerpt(result.stderr)
+  };
+}
+function roundDirectory(s, round) {
+  return join3(s.runDir, "rounds", String(round).padStart(3, "0"));
+}
+function reportPaths(s, role, round) {
+  const directory = roundDirectory(s, round);
+  return {
+    role,
+    round,
+    json: join3(directory, `${role}.json`),
+    markdown: join3(directory, `${role}.md`),
+    raw: join3(directory, `${role}.raw.json`),
+    ...role === "verifier" ? { checks: join3(directory, "checks.json") } : {}
+  };
+}
 async function workerPrompt(s, role, evidence2) {
-  const procedure = await readFile4(s.pins.procedurePath, "utf8");
+  const procedure = role === "verifier" ? await readFile4(s.pins.procedurePath, "utf8") : void 0;
+  const verifier = s.verifier;
+  const fixer = s.fixer;
   return [
     `Perform exactly one ${role} assignment for the pinned OpenSpec change. The controller owns the loop.`,
     workerInstructions[role],
@@ -1032,66 +1112,170 @@ async function workerPrompt(s, role, evidence2) {
     })}`,
     `Checkout: ${s.project}
 Verification procedure: ${s.pins.procedurePath}
-Resource base directory: ${dirname3(s.pins.procedurePath)}`,
-    "The project procedure follows. Execute it in full for verification. Use its real relative resources; do not replace it with a generic review.",
-    "<openspec-verification-procedure>",
-    procedure,
-    "</openspec-verification-procedure>",
-    role === "verifier" ? "Inspect only. Re-read the artifacts and implementation and perform full verification, including new regressions. Do not implement, change task state, sync specs, or archive. Include individual checks from the procedure AND aggregate checks with IDs completeness, correctness, coherence. Clean means all severities zero, every prior finding resolved with evidence, and every applicable check verified. A justified not_applicable check is allowed. Recommendations are suggestions. Missing evidence is not a passing check." : "Fix every supplied finding, including warnings, suggestions, unresolved earlier findings, and repairable missing evidence. Preserve unrelated work. Do not weaken tests or requirements. Update task evidence only if work is implemented. Run relevant checks. Report unresolved requirements/design decisions or external prerequisites as blockers. Do not verify another round or archive.",
+Resource base directory: ${dirname3(s.pins.procedurePath)}
+Pinned procedure/resource digest: ${s.pins.procedureDigest}`,
+    role === "verifier" ? `The authoritative pinned verification procedure is already loaded below. Execute it in full; do not rediscover or reread its entrypoint. Read referenced relative resources from the resource base directory when needed.
+<openspec-verification-procedure>
+${procedure}
+</openspec-verification-procedure>` : "Use the pinned procedure path and resources when a supplied finding needs that context. Complete the fixing assignment, then return its outcome to the controller.",
+    role === "verifier" ? "Inspect only. Re-read the artifacts and implementation and perform full verification, including new regressions. Use the controller's current check evidence for matching commands against this workspace; run additional procedure checks and repeat a check when new changes, failures, or uncertainty require it. Previous-round evidence cannot establish current success. Do not implement, change task state, sync specs, or archive. Include individual checks from the procedure AND aggregate checks with IDs completeness, correctness, coherence. Clean means all severities zero, every prior finding resolved with evidence, and every applicable check verified. A justified not_applicable check is allowed. Recommendations are suggestions. Missing evidence is not a passing check." : "Fix every supplied finding, including warnings, suggestions, unresolved earlier findings, and repairable missing evidence. Preserve unrelated work. Do not weaken tests or requirements. Update task evidence only if work is implemented. Run relevant checks. Report unresolved requirements/design decisions or external prerequisites as blockers. Do not verify another round or archive.",
     role === "fixer" && s.taskContext ? `Pinned OpenSpec task context (apply context constraints; operationGuidance is advisory; state/instruction are context, not authorization to archive):
 ${JSON.stringify(s.taskContext, null, 2)}` : "",
     `All prior/unresolved findings requiring disposition (none may be dropped):
 ${JSON.stringify(s.prior, null, 2)}`,
-    s.verifier ? `Complete latest verification report:
-${JSON.stringify(s.verifier, null, 2)}` : "",
-    s.fixer ? `Complete latest fixer outcome:
-${JSON.stringify(s.fixer, null, 2)}` : "",
-    evidence2 ? `Controller's independent current check evidence (failures/incomplete tasks prevent clean):
-${JSON.stringify(evidence2, (key, value) => ["before", "after"].includes(key) ? void 0 : value, 2)}` : "",
+    verifier ? `Latest verification checks and resolutions (findings are supplied once above; check prior evidence against the current workspace):
+${JSON.stringify({
+      round: verifier.round,
+      verificationComplete: verifier.verificationComplete,
+      outcome: verifier.outcome,
+      checks: verifier.checks,
+      priorFindingResolutions: verifier.priorFindingResolutions,
+      blockers: verifier.blockers
+    }, null, 2)}` : "",
+    role === "verifier" && fixer ? `Latest fixer dispositions (claims require independent verification):
+${JSON.stringify({
+      round: fixer.round,
+      outcome: fixer.outcome,
+      addressedFindings: fixer.addressedFindings,
+      unresolvedFindings: fixer.unresolvedFindings,
+      changedFiles: fixer.changedFiles,
+      checksRun: fixer.checksRun,
+      blockers: fixer.blockers
+    }, null, 2)}` : "",
+    verifier || fixer ? `Complete JSON, Markdown, and raw reports remain saved at these paths; consult them for additional detail:
+${JSON.stringify([
+      ...verifier ? [reportPaths(s, "verifier", verifier.round)] : [],
+      ...fixer ? [reportPaths(s, "fixer", fixer.round)] : []
+    ], null, 2)}` : "",
+    evidence2 ? `Controller's independent current check evidence (failures/incomplete tasks prevent clean; excerpts retain actual exit status; full output is saved):
+${JSON.stringify({
+      workspace: evidence2.after.hash,
+      checksPath: join3(roundDirectory(s, s.round), "checks.json"),
+      validation: commandEvidence(evidence2.validation),
+      apply: evidence2.apply,
+      checks: evidence2.checks.map((check, index) => ({ id: s.config.checks[index]?.id, ...commandEvidence(check) }))
+    }, null, 2)}` : "",
     `Return exactly one JSON object conforming to this schema. Keep the full OpenSpec-style Markdown report in fullReportMarkdown. Do not output commentary or omit fields.
 ${JSON.stringify(reportJsonSchema(role))}`
   ].filter(Boolean).join("\n\n");
 }
 
+// src/summary.ts
+import { join as join4 } from "node:path";
+var stages = ["prepared", "submitted", "completed", "accepted"];
+var markdownDestination = (path) => `<${path.replaceAll("%", "%25").replaceAll("<", "%3C").replaceAll(">", "%3E")}>`;
+function progressFor(state, worker) {
+  if (worker.progress) return worker.progress;
+  const report = worker.role === "verifier" ? state.verifier : state.fixer;
+  if (report?.round === worker.round) return "accepted";
+  if (state.pending?.assignment.sessionId === worker.sessionId && state.pending.stage === "submitted") return "submitted";
+  return "prepared";
+}
+function reportLocation(state, report) {
+  if (!report) return void 0;
+  const path = join4(state.runDir, "rounds", String(report.round).padStart(3, "0"), report.role);
+  return { round: report.round, outcome: report.outcome, json: `${path}.json`, markdown: `${path}.md` };
+}
+function completedLocation(state, role) {
+  const worker = state.workers.findLast((worker2) => worker2.role === role && stages.indexOf(progressFor(state, worker2)) >= stages.indexOf("completed"));
+  return worker ? { round: worker.round, raw: join4(state.runDir, "rounds", String(worker.round).padStart(3, "0"), `${role}.raw.json`) } : void 0;
+}
+function runSummary(state) {
+  const progress = Object.fromEntries(["verifier", "fixer"].map((role) => {
+    const workers = state.workers.filter((worker) => worker.role === role);
+    return [role, Object.fromEntries(stages.map((stage, index) => [
+      stage,
+      workers.filter((worker) => stages.indexOf(progressFor(state, worker)) >= index).length
+    ]))];
+  }));
+  const unresolvedSeverityCounts = { critical: 0, warning: 0, suggestion: 0 };
+  for (const finding of state.prior) unresolvedSeverityCounts[finding.severity]++;
+  return {
+    outcome: state.phase,
+    runId: state.runId,
+    runDir: state.runDir,
+    change: state.pins.changeName,
+    round: state.round,
+    rounds: progress.verifier.accepted,
+    reason: state.reason,
+    failure: state.failure,
+    finalizationFailure: state.finalizationFailure,
+    executor: state.executor,
+    requests: state.requests,
+    pending: state.pending ? {
+      sessionId: state.pending.assignment.sessionId,
+      inputId: state.pending.assignment.inputId,
+      role: state.pending.assignment.role,
+      round: state.pending.assignment.round,
+      stage: state.pending.stage
+    } : void 0,
+    models: state.pins.models,
+    workers: state.workers,
+    progress,
+    progressIncomplete: state.workers.some((worker) => !worker.progress),
+    unresolvedFindings: state.prior,
+    unresolvedSeverityCounts,
+    lastVerifier: reportLocation(state, state.verifier),
+    lastFixer: reportLocation(state, state.fixer),
+    lastCompletedVerifier: completedLocation(state, "verifier"),
+    lastCompletedFixer: completedLocation(state, "fixer"),
+    reports: join4(state.runDir, "rounds"),
+    activeMs: state.activeMs
+  };
+}
+function summaryMarkdown(state) {
+  const result = runSummary(state);
+  const lines = [
+    `# OpenSpec verification loop: ${result.outcome}`,
+    "",
+    result.reason ?? "",
+    "",
+    `Change: ${result.change}`,
+    `Run: ${result.runId}`,
+    `Reports: ${result.reports}`,
+    "",
+    ...["verifier", "fixer"].map((role) => {
+      const counts = result.progress[role];
+      return `${role}: ${counts.prepared} prepared, ${counts.submitted} submitted, ${counts.completed} completed, ${counts.accepted} reports accepted`;
+    }),
+    "",
+    `Unresolved findings: ${state.prior.length} (${Object.entries(result.unresolvedSeverityCounts).map(([severity, count]) => `${count} ${severity}`).join(", ")})`
+  ];
+  if (result.failure) lines.push("", `Failure: ${result.failure.role} round ${result.failure.round}, ${result.failure.stage}`, result.failure.error);
+  if (result.finalizationFailure && (result.finalizationFailure.stage !== result.failure?.stage || result.finalizationFailure.error !== result.failure?.error)) {
+    lines.push("", `Finalization failure: ${result.finalizationFailure.stage}`, result.finalizationFailure.error);
+  }
+  if (result.finalizationFailure?.cleanupError) lines.push("", `Ownership cleanup also failed: ${result.finalizationFailure.cleanupError}`);
+  if (result.progressIncomplete) lines.push("", "This older run lacks complete lifecycle records; counts include only saved or otherwise proven progress.");
+  for (const finding of state.prior) lines.push("", `- ${finding.id} (${finding.severity}): ${finding.title}`);
+  for (const [role, report] of [["verifier", result.lastVerifier], ["fixer", result.lastFixer]]) {
+    if (report) lines.push("", `Last accepted ${role}: round ${report.round}, ${report.outcome}`, `[Report](${markdownDestination(report.markdown)})`);
+  }
+  for (const [role, completed] of [["verifier", result.lastCompletedVerifier], ["fixer", result.lastCompletedFixer]]) {
+    if (completed) lines.push("", `Last completed ${role} output: round ${completed.round} [Raw output](${markdownDestination(completed.raw)})`);
+  }
+  if (result.pending) lines.push("", `Pending ${result.pending.role}: ${result.pending.sessionId} (${result.pending.stage}); checkout remains reserved`);
+  lines.push("", "Worker models:", ...["verifier", "fixer"].map((role) => {
+    const model = result.models[role];
+    return `${role}: ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`;
+  }));
+  return `${lines.join("\n")}
+`;
+}
+
 // src/controller.ts
 async function persistEvidence(s, round, evidence2) {
-  if (evidence2) await atomicWrite(join3(s.runDir, "rounds", String(round).padStart(3, "0"), "checks.json"), {
+  if (evidence2) await atomicWrite(join5(s.runDir, "rounds", String(round).padStart(3, "0"), "checks.json"), {
     workspace: evidence2.after.hash,
     validation: evidence2.validation,
     apply: evidence2.apply,
     checks: evidence2.checks
   });
 }
-async function persistOutcome(s) {
-  const final = {
-    outcome: s.phase,
-    runId: s.runId,
-    change: s.pins.changeName,
-    rounds: s.workers.filter((w) => w.role === "verifier").length,
-    reason: s.reason,
-    runDir: s.runDir,
-    pending: s.pending ? { sessionId: s.pending.assignment.sessionId, role: s.pending.assignment.role } : void 0,
-    models: s.pins.models,
-    workers: s.workers,
-    requests: s.requests,
-    activeMs: s.activeMs
-  };
-  await atomicWrite(join3(s.runDir, "final.json"), final);
-  const models = ["verifier", "fixer"].map((role) => {
-    const model = s.pins.models[role];
-    return `${role}: ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`;
-  }).join("\n");
-  await atomicWrite(join3(s.runDir, "final.md"), `# OpenSpec verification loop: ${s.phase}
-
-${s.reason ?? ""}
-
-Change: ${s.pins.changeName}
-Run: ${s.runId}
-Reports: ${join3(s.runDir, "rounds")}
-
-Worker models:
-${models}
-`, true);
+async function persistOutcome(s, includeExecutor = false) {
+  const final = { ...runSummary(s), executor: includeExecutor ? s.executor : void 0 };
+  await atomicWrite(join5(s.runDir, "final.json"), final);
+  await atomicWrite(join5(s.runDir, "final.md"), summaryMarkdown(s), true);
   return final;
 }
 async function prepareRun(project, config, adapter, change, options = {}) {
@@ -1141,6 +1325,10 @@ async function executeLoop(store, adapter, options = {}) {
   const timer = remaining !== void 0 && remaining < 2147483647 ? AbortSignal.timeout(Math.ceil(remaining)) : void 0;
   const workSignal = options.signal && timer ? AbortSignal.any([options.signal, timer]) : options.signal ?? timer;
   const previousActive = s.activeMs;
+  let activity = { role: s.pending?.assignment.role ?? s.nextRole, round: s.pending?.assignment.round ?? s.round, stage: "checking_pins" };
+  const at = (stage, role = s.pending?.assignment.role ?? s.nextRole, round = s.pending?.assignment.round ?? s.round) => {
+    activity = { role, round, stage };
+  };
   const emit = (event) => options.emit?.(event);
   const save = async () => {
     s.activeMs = previousActive + Date.now() - started;
@@ -1165,22 +1353,30 @@ async function executeLoop(store, adapter, options = {}) {
     if (s.config.maxMinutes && Date.now() - s.createdAt >= s.config.maxMinutes * 6e4) throw new LoopError("limited", "Time limit reached");
   };
   try {
-    await rm2(join3(s.runDir, "final.json"), { force: true });
-    await rm2(join3(s.runDir, "final.md"), { force: true });
+    await rm2(join5(s.runDir, "final.json"), { force: true });
+    await rm2(join5(s.runDir, "final.md"), { force: true });
     delete s.reason;
+    delete s.failure;
+    delete s.finalizationFailure;
     delete s.requests;
     emit({ event: "started", runId: s.runId, runDir: s.runDir, change: s.pins.changeName, models: s.pins.models });
     await checkPins(s.pins, s.config, adapter);
     while (true) {
+      at("before_dispatch");
       await guard();
       if (!s.pending) {
         if (s.config.maxRounds && s.round > s.config.maxRounds) throw new LoopError("limited", "Verification round limit reached");
+        at("checking_pins");
         await checkPins(s.pins, s.config, adapter);
         const role = s.nextRole;
+        at("gathering_evidence");
         const evidence2 = role === "verifier" ? await gatherEvidence(s.pins, s.config, workSignal) : void 0;
         if (evidence2) s.taskContext = evidence2.apply;
+        at("snapshotting");
         const before = evidence2?.after ?? await snapshot(s.project);
+        at("building_prompt");
         const prompt = await workerPrompt(s, role, evidence2);
+        at("persisting_evidence");
         await persistEvidence(s, s.round, evidence2);
         if (Buffer.byteLength(prompt) > 2 * 1024 * 1024) throw new LoopError("blocked", "Complete worker context exceeds 2 MiB; reduce report/context size without dropping findings");
         const assignment = {
@@ -1197,14 +1393,16 @@ async function executeLoop(store, adapter, options = {}) {
         };
         s.pending = { assignment, stage: "prepared", before, ...evidence2 ? { evidence: evidence2 } : {} };
         s.phase = role === "verifier" ? "verifying" : "fixing";
-        s.workers.push({ sessionId: assignment.sessionId, inputId: assignment.inputId, role, round: s.round });
+        s.workers.push({ sessionId: assignment.sessionId, inputId: assignment.inputId, role, round: s.round, progress: "prepared" });
         await save();
         await store.event("dispatch_prepared", { sessionId: assignment.sessionId, role, round: s.round });
       }
       const pending = s.pending;
       const a = pending.assignment;
+      const worker = s.workers.find((worker2) => worker2.sessionId === a.sessionId && worker2.inputId === a.inputId);
       s.phase = a.role === "verifier" ? "verifying" : "fixing";
       if (pending.stage === "prepared") {
+        at("creating_session");
         await adapter.ensureSession(a);
         pending.stage = "created";
         await save();
@@ -1212,18 +1410,23 @@ async function executeLoop(store, adapter, options = {}) {
       if (pending.stage === "created") {
         pending.stage = "admitting";
         await save();
+        at("admitting_prompt");
         await adapter.ensurePrompt(a, true);
         pending.stage = "submitted";
+        if (worker) worker.progress = "submitted";
         await save();
       } else if (pending.stage === "admitting") {
+        at("reconciling_prompt");
         await adapter.ensurePrompt(a, false);
         pending.stage = "submitted";
+        if (worker) worker.progress = "submitted";
         await save();
       }
       emit({ event: "worker", role: a.role, round: a.round, sessionId: a.sessionId, inputId: a.inputId });
       const progress = new AbortController();
       const subscription = adapter.subscribe?.(a.sessionId, progress.signal, (type) => emit({ event: "progress", role: a.role, round: a.round, type }));
       let observation;
+      at("observing_worker");
       try {
         let failures = 0;
         while (true) {
@@ -1252,44 +1455,56 @@ async function executeLoop(store, adapter, options = {}) {
       if (observation.status !== "completed") {
         throw new LoopError(observation.status === "interrupted" ? "interrupted" : "failed", observation.reason);
       }
-      const roundDir = join3(s.runDir, "rounds", String(a.round).padStart(3, "0"));
+      const roundDir = join5(s.runDir, "rounds", String(a.round).padStart(3, "0"));
+      at("saving_output");
       await mkdir2(roundDir, { recursive: true });
-      await atomicWrite(join3(roundDir, `${a.role}.raw.json`), { sessionId: a.sessionId, inputId: a.inputId, messageId: observation.messageId, text: observation.text });
+      await atomicWrite(join5(roundDir, `${a.role}.raw.json`), { sessionId: a.sessionId, inputId: a.inputId, messageId: observation.messageId, text: observation.text });
+      if (worker) worker.progress = "completed";
+      await save();
       await persistEvidence(s, a.round, pending.evidence);
       if (pending.evidence) s.taskContext = pending.evidence.apply;
+      at("checking_worker_pins");
       await checkPins(s.pins, s.config, adapter);
+      at("checking_workspace");
       const after = await snapshot(s.project);
       await guard();
       if (after.head !== pending.before.head) throw new LoopError("blocked", "Checkout HEAD changed during the worker assignment; committing or switching branches is outside this loop");
       if (a.role === "verifier" && pending.before.hash !== after.hash) {
         throw new LoopError("blocked", `Checkout changed during verification: ${changedFiles(pending.before, after).join(", ")}; a fresh reviewed run is required`);
       }
+      at("validating_report");
       const report = parseReport(observation.text, a.role, { runId: s.runId, round: a.round, changeName: s.pins.changeName, targetPath: s.pins.targetPath }, s.prior);
-      await atomicWrite(join3(roundDir, `${a.role}.json`), { sessionId: a.sessionId, inputId: a.inputId, messageId: observation.messageId, workspace: after.hash, report });
-      await atomicWrite(join3(roundDir, `${a.role}.md`), report.fullReportMarkdown, true);
+      if (report.role === "verifier" && report.outcome === "clean") {
+        at("checking_evidence");
+        const failures = pending.evidence ? evidenceFailures(pending.evidence) : ["No independent check evidence"];
+        if (failures.length) throw new Error(`Clean report contradicts independent evidence: ${failures.join("; ")}`);
+      }
+      at("accepting_report");
+      await atomicWrite(join5(roundDir, `${a.role}.json`), { sessionId: a.sessionId, inputId: a.inputId, messageId: observation.messageId, workspace: after.hash, report });
+      await atomicWrite(join5(roundDir, `${a.role}.md`), report.fullReportMarkdown, true);
+      if (worker) worker.progress = "accepted";
       delete s.pending;
-      await store.event("report_accepted", { role: a.role, round: a.round, messageId: observation.messageId });
       if (report.role === "verifier") {
         s.verifier = report;
-        const repairs = needsRepair(report, s.prior);
+        s.prior = needsRepair(report, s.prior);
+      } else s.fixer = report;
+      await save();
+      await store.event("report_accepted", { role: a.role, round: a.round, messageId: observation.messageId });
+      if (report.role === "verifier") {
         if (report.outcome === "blocked" || report.blockers.length) {
           await terminate("blocked", report.blockers.join("; "));
           break;
         }
         if (report.outcome === "clean") {
-          const failures = pending.evidence ? evidenceFailures(pending.evidence) : ["No independent check evidence"];
-          if (failures.length) throw new Error(`Clean report contradicts independent evidence: ${failures.join("; ")}`);
           s.phase = "clean";
           s.reason = "Fresh full verification has zero findings and all applicable checks are verified";
           s.prior = [];
           await save();
           break;
         }
-        s.prior = repairs;
         s.nextRole = "fixer";
-        emit({ event: "findings", round: s.round, count: repairs.length });
+        emit({ event: "findings", round: s.round, count: s.prior.length });
       } else {
-        s.fixer = report;
         if (report.outcome === "blocked") {
           await terminate("blocked", [...report.blockers, ...report.unresolvedFindings.map((f) => f.reason)].join("; "));
           break;
@@ -1310,17 +1525,61 @@ async function executeLoop(store, adapter, options = {}) {
     }
   } catch (e) {
     const phase = options.signal?.aborted ? "interrupted" : timer?.aborted ? "limited" : e instanceof LoopError && ["blocked", "interrupted", "limited"].includes(e.outcome) ? e.outcome : "failed";
-    await terminate(phase, timer?.aborted && !options.signal?.aborted ? "Time limit reached" : errorMessage(e), s.pending?.stage === "admitting");
+    s.failure = { ...activity, error: errorMessage(e), ...s.pending ? {
+      sessionId: s.pending.assignment.sessionId,
+      inputId: s.pending.assignment.inputId
+    } : {} };
+    try {
+      await save();
+      await terminate(phase, timer?.aborted && !options.signal?.aborted ? "Time limit reached" : errorMessage(e), s.pending?.stage === "admitting");
+    } catch (error) {
+      if (!await store.hasLiveOwnership()) throw error;
+      s.phase = "failed";
+      s.reason = errorMessage(error);
+      s.finalizationFailure = { ...activity, stage: "saving_failure", error: errorMessage(error) };
+    }
   } finally {
-    const final = await persistOutcome(s);
-    await store.release(Boolean(s.pending));
-    emit(final);
+    let final;
+    let outcomeError;
+    try {
+      final = await persistOutcome(s);
+    } catch (error) {
+      if (!await store.hasLiveOwnership()) throw error;
+      outcomeError = error;
+      s.finalizationFailure = { ...activity, stage: "persisting_outcome", error: errorMessage(error) };
+      s.failure ??= s.finalizationFailure;
+      s.phase = "failed";
+      s.reason = errorMessage(error);
+      await save().catch(() => {
+      });
+      try {
+        final = await persistOutcome(s);
+      } catch (error2) {
+        await store.event("final_report_failed", { reason: errorMessage(error2) }).catch(() => {
+        });
+      }
+    }
+    try {
+      await store.release(Boolean(s.pending));
+    } catch (error) {
+      if (await store.hasLiveOwnership()) {
+        if (s.finalizationFailure) s.finalizationFailure.cleanupError = errorMessage(error);
+        else s.finalizationFailure = { ...activity, stage: "releasing_ownership", error: errorMessage(error) };
+      }
+      throw outcomeError ?? error;
+    }
+    if (final) {
+      try {
+        emit(final);
+      } catch {
+      }
+    }
   }
   return s;
 }
 async function prepareResume(store, adapter, options = {}) {
+  await store.acquire(true);
   if (store.state.phase === "clean") {
-    await store.acquire(true);
     try {
       await persistOutcome(store.state);
     } finally {
@@ -1328,8 +1587,7 @@ async function prepareResume(store, adapter, options = {}) {
     }
     throw new LoopError("blocked", "This run is already clean; its reservation is released. Start a new run to verify again");
   }
-  await store.acquire(true);
-  await rm2(join3(store.state.runDir, "stop.request"), { force: true });
+  await rm2(join5(store.state.runDir, "stop.request"), { force: true });
   if (!store.state.pending) {
     store.state.round = Math.max(store.state.round, ...store.state.workers.map((w) => w.round + 1));
     store.state.nextRole = "verifier";
@@ -1337,8 +1595,8 @@ async function prepareResume(store, adapter, options = {}) {
   }
   return store;
 }
-async function stopRun(store, adapter) {
-  await store.acquire(true);
+async function stopRun(store, adapter, expected) {
+  if (!await store.acquire(true, expected)) return store.state;
   try {
     if (store.state.phase === "clean" && !store.state.pending) {
       await persistOutcome(store.state);
@@ -1347,6 +1605,12 @@ async function stopRun(store, adapter) {
     if (store.state.pending?.stage === "admitting") {
       if (!adapter) throw new Error("Worker reconciliation requires the OpenCode adapter");
       await adapter.ensurePrompt(store.state.pending.assignment, false);
+      store.state.pending.stage = "submitted";
+    }
+    if (store.state.pending?.stage === "submitted") {
+      const worker = store.state.workers.find((worker2) => worker2.sessionId === store.state.pending.assignment.sessionId && worker2.inputId === store.state.pending.assignment.inputId);
+      if (worker && (!worker.progress || worker.progress === "prepared")) worker.progress = "submitted";
+      await store.save();
     }
     if (store.state.pending && (!adapter || !await adapter.interrupt(store.state.pending.assignment))) {
       throw new LoopError("blocked", "Worker termination is unconfirmed; checkout remains reserved");
@@ -1365,23 +1629,6 @@ async function stopRun(store, adapter) {
 }
 
 // src/manager.ts
-function runSummary(state) {
-  return {
-    outcome: state.phase,
-    runId: state.runId,
-    runDir: state.runDir,
-    change: state.pins.changeName,
-    round: state.round,
-    reason: state.reason,
-    executor: state.executor,
-    requests: state.requests,
-    pending: state.pending ? { sessionId: state.pending.assignment.sessionId, role: state.pending.assignment.role } : void 0,
-    models: state.pins.models,
-    workers: state.workers,
-    unresolvedFindings: state.prior,
-    reports: join4(state.runDir, "rounds")
-  };
-}
 var RunManager = class {
   constructor(options = {}) {
     this.options = options;
@@ -1412,14 +1659,27 @@ var RunManager = class {
       try {
         await executeLoop(store, adapter, { ...this.options, signal: abort.signal });
       } catch (error) {
+        if (!await store.hasLiveOwnership()) return;
         store.state.phase = "failed";
         store.state.reason = errorMessage(error);
+        store.state.executor = { pid: process.pid, runtimeId: store.runtimeId };
+        store.state.finalizationFailure ??= {
+          role: store.state.pending?.assignment.role ?? store.state.nextRole,
+          round: store.state.pending?.assignment.round ?? store.state.round,
+          stage: "finalizing",
+          error: errorMessage(error)
+        };
+        store.state.failure ??= store.state.finalizationFailure;
         await store.event("controller_error", { reason: store.state.reason }).catch(() => {
         });
         await store.save().catch(() => {
         });
+        await persistOutcome(store.state, true).catch(async (error2) => {
+          await store.event("final_report_failed", { reason: errorMessage(error2) }).catch(() => {
+          });
+        });
       }
-      if (store.state.pending) this.paused.set(project, { state: store.state, adapter });
+      if (store.state.pending) this.paused.set(project, { store, adapter });
       try {
         await this.options.notify?.(store.state);
       } catch (error) {
@@ -1479,7 +1739,7 @@ var RunManager = class {
     return this.perform(async () => {
       const task = this.active.get(project);
       if (task && task.store.state.runId === runId2) {
-        await atomicWrite(join4(task.store.state.runDir, "stop.request"), { time: Date.now() });
+        await atomicWrite(join6(task.store.state.runDir, "stop.request"), { time: Date.now() });
         task.abort.abort();
         let timer;
         await Promise.race([task.promise, new Promise((resolve6) => {
@@ -1499,7 +1759,7 @@ var RunManager = class {
           else throw error;
         }
         if (alive2) {
-          await atomicWrite(join4(store.state.runDir, "stop.request"), { time: Date.now() });
+          await atomicWrite(join6(store.state.runDir, "stop.request"), { time: Date.now() });
           return { ...runSummary(store.state), outcome: "stopping" };
         }
       }
@@ -1520,9 +1780,10 @@ var RunManager = class {
       const tasks = [...this.active.values()];
       for (const task of tasks) task.abort.abort();
       await Promise.all(tasks.map((task) => task.promise));
-      for (const { state, adapter } of this.paused.values()) {
+      for (const { store, adapter } of this.paused.values()) {
+        const state = store.state;
         try {
-          await stopRun(new RunStore(state, this.options.lockRoot, this.runtimeId), adapter);
+          await stopRun(new RunStore(state, this.options.lockRoot, this.runtimeId), adapter, store.reservationIdentity);
         } catch (error) {
           await new RunStore(state, this.options.lockRoot, this.runtimeId).event("shutdown_reconciliation_failed", { reason: errorMessage(error) }).catch(() => {
           });
@@ -1577,7 +1838,7 @@ async function protectContext(ctx, event) {
   const input = messages.findLast((message) => message.type === "user" || message.type === "synthetic");
   if (input?.type === "synthetic" && input.metadata?.openspecLoopNotice === true) {
     event.tools = {};
-    event.system.push({ type: "text", text: "This turn only reports the latest OpenSpec loop notice. State its outcome and run/report location concisely. Do not perform work, invoke tools, or claim clean unless the notice says clean." });
+    event.system.push({ type: "text", text: "This turn only reports the latest OpenSpec loop notice. State its outcome and run/report location concisely. Use the saved progress counts to distinguish completed worker outputs from accepted reports; prepared assignments do not prove execution. Counts marked incomplete are lower bounds. Include outstanding findings and the failing role/stage when present. Do not perform work, invoke tools, or claim clean unless the notice says clean." });
   }
 }
 async function setupPlugin(ctx) {

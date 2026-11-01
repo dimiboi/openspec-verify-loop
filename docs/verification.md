@@ -23,6 +23,16 @@ model references, options validation, and resource paths.
 Model regressions cover the invoking assistant's model/variant, absent session
 model fields, later model switches, explicit role overrides, missing/unavailable
 models without default substitution, and pinned selections across rounds/resume.
+Context regressions cover verbose report Markdown, noisy check logs, complete
+issue/disposition handoffs, and a single procedure copy per verifier. Progress
+regressions cover failures before admission, between roles, and after worker
+completion; blocked reports with findings; and changing model inventories. They
+distinguish worker completion from report acceptance and compare status with saved
+final outcomes while retaining checkout reservations for uncertain admission.
+Failure-injection cases also cover stopping an input whose admission response was
+lost and failures while writing final reports or releasing execution ownership.
+Successor-controller interleavings verify that a retiring controller cannot
+overwrite state after handing off its reservation.
 The Git-packaging regression uses npm's resolver against a local Git fixture. It
 reproduces preparation failure with a `build` script, then verifies that the
 package ships its prebuilt entrypoint and skill without starting child npm.
@@ -58,6 +68,12 @@ For GitHub installation, use a pushed ref that contains the plugin entrypoint.
    reconciled; newly required assignments use fresh sessions.
 7. Confirm start/status/final notices render, and their reporting turns cannot use
    tools. An ordinary subsequent user turn should retain its normal tools.
+8. Inspect worker prompts and saved `checks.json` files. Verify that the verifier
+   receives one procedure copy, fixers receive every issue, check excerpts preserve
+   exit codes and link to complete logs, and later verifiers receive every prior
+   issue and the fixer's dispositions. After a failed or interrupted run, compare
+   status, the completion notice, and `final.json`/`final.md`: completed and accepted
+   work, remaining findings, failure stage, and report paths should agree.
 
 The supported target is a repo-local OpenSpec root at one Git checkout root.
 Permissions are not a filesystem sandbox. Unknown admission and unconfirmed

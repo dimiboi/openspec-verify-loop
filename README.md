@@ -70,6 +70,13 @@ explicit resolution with evidence. Independent OpenSpec validation and configure
 checks must pass against the reviewed workspace. A fixer's completion claim cannot
 make the run clean. Justified not-applicable checks are allowed.
 
+Verifier prompts include the pinned verification procedure once. Fixers receive
+the complete issue list and relevant task/check context; subsequent verifiers
+receive the prior issues and compact fix dispositions. Full reports remain on
+disk. Independent check output is represented by exit codes, bounded excerpts,
+and saved evidence paths, so lengthy logs and report Markdown do not fill each
+worker's prompt. No finding or required check is dropped to shorten a handoff.
+
 The built-in `build` agent runs both roles with per-session policies. Verifiers
 cannot use edit tools; shell commands require approval except for narrow inspection
 rules. Shell permissions are not a filesystem sandbox. Unexpected source changes
@@ -159,6 +166,15 @@ rounds/001/fixer.md
 final.json
 final.md
 ```
+
+Status, final reports, and completion notices share the same progress summary.
+It distinguishes prepared assignments, submitted inputs, completed worker outputs,
+and accepted reports for each role. Only accepted verifier reports count as
+completed verification rounds. Failure summaries retain outstanding findings,
+the failing role/round/stage, the original error, and report paths. A completed
+worker whose output fails validation is shown separately from an accepted report;
+its raw output remains available for inspection. Counts for older saved runs
+without lifecycle records are conservative and marked incomplete.
 
 A shared checkout reservation prevents overlapping loops even when report locations
 differ. Resume reconciles saved worker/input identities rather than replaying

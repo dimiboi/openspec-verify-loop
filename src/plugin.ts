@@ -24,7 +24,7 @@ export async function protectContext(ctx: Plugin.Context, event: Parameters<Para
   const input = messages.findLast(message => message.type === 'user' || message.type === 'synthetic');
   if (input?.type === 'synthetic' && input.metadata?.openspecLoopNotice === true) {
     event.tools = {};
-    event.system.push({type: 'text', text: 'This turn only reports the latest OpenSpec loop notice. State its outcome and run/report location concisely. Do not perform work, invoke tools, or claim clean unless the notice says clean.'});
+    event.system.push({type: 'text', text: 'This turn only reports the latest OpenSpec loop notice. State its outcome and run/report location concisely. Use the saved progress counts to distinguish completed worker outputs from accepted reports; prepared assignments do not prove execution. Counts marked incomplete are lower bounds. Include outstanding findings and the failing role/stage when present. Do not perform work, invoke tools, or claim clean unless the notice says clean.'});
   }
 }
 
