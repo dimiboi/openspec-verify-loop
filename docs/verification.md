@@ -20,6 +20,9 @@ ownership, same-process generation handover, and pending-worker cleanup.
 Native interface tests cover command parsing, plugin registrations/disposal,
 worker recursion rejection, tool-free reporting turns, host endpoint identity,
 model references, options validation, and resource paths.
+The Git-packaging regression uses npm's resolver against a local Git fixture. It
+reproduces preparation failure with a `build` script, then verifies that the
+package ships its prebuilt entrypoint and skill without starting child npm.
 
 ## Manual OpenCode checks
 

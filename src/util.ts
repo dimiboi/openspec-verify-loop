@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process';
 import { lstat, readFile, readlink, realpath } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.2.1';
 export const OPENCODE_VERSION = '2.2.5';
 export class LoopError extends Error {
   constructor(public outcome: string, message: string, public details?: unknown) { super(message); }

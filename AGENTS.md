@@ -1,7 +1,7 @@
 # Working in this repository
 
 - Use Node.js >=22.18 and `npm ci`. Run `npm run check` for code changes: types, build, deterministic tests, and package validation. Documentation-only edits do not need the suite.
-- Edit `src/`; `npm run build` generates the committed `dist/index.js`. Keep host SDK/runtime dependencies external to the bundle.
+- Edit `src/`; `npm run bundle` generates the committed `dist/index.js`. Keep host SDK/runtime dependencies external to the bundle.
 - Resolve packaged resources from `import.meta.url` and consuming project paths from the invoking session's location. The plugin must never start, replace, or stop an OpenCode service.
 
 ## Loop invariants

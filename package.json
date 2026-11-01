@@ -1,6 +1,6 @@
 {
   "name": "openspec-verify-loop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "license": "MIT",
   "type": "module",
@@ -9,10 +9,10 @@
     "node": ">=22.18.0"
   },
   "scripts": {
-    "build": "node scripts/build.mjs",
+    "bundle": "node scripts/bundle.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
-    "check": "npm run typecheck && npm run build && npm test && node scripts/validate-plugin.mjs"
+    "check": "npm run typecheck && npm run bundle && npm test && node scripts/validate-plugin.mjs"
   },
   "dependencies": {
     "@opencode/client": "2.2.5",

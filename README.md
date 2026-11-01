@@ -184,8 +184,10 @@ registries/workers and isolated local OpenSpec fixtures, and validates the expor
 package and skill resources. It makes no model calls and starts no OpenCode session.
 `dist/index.js` is committed so Git installations require no build hook. Runtime
 dependencies are external imports installed by OpenCode's package manager.
+The development bundler is named `bundle`: npm treats a `build` script as a Git
+preparation trigger even when the generated output is already committed.
 
 For development, point a consuming project's plugin entry at this repository's
-absolute directory, then rebuild with `npm run build`. See
+absolute directory, then rebuild with `npm run bundle`. See
 [verification and manual testing](docs/verification.md) for the checks you can run
 in OpenCode. Real-host and model testing are separate from the automated suite.
