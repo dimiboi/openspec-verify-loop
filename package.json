@@ -1,0 +1,29 @@
+{
+  "name": "openspec-verify-loop",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "description": "An installable OpenCode skill that verifies and fixes an OpenSpec change until clean",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "test:live": "tsx tests/live.ts",
+    "check": "npm run typecheck && npm run build && npm test && node scripts/validate-skill.mjs"
+  },
+  "dependencies": {
+    "@opencode/client": "2.2.5",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@fission-ai/openspec": "1.16.0",
+    "@types/node": "26.6.6",
+    "esbuild": "0.28.2",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2"
+  }
+}
