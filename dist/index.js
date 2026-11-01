@@ -196,6 +196,19 @@ function parseModel(input) {
   if (!id || variant === "") throw new Error("Invalid model reference");
   return { providerID: input.slice(0, slash), id, ...variant ? { variant } : {} };
 }
+async function resolveOriginModel(ctx, origin, messageId) {
+  if (!messageId && origin.model) return { ...origin.model };
+  const messages = await ctx.session.context({ sessionID: origin.id }, request());
+  if (messageId) {
+    const message = messages.find((message2) => message2.id === messageId);
+    if (message?.type !== "assistant") {
+      throw new LoopError("blocked", `Cannot identify the invoking model for message ${messageId} in session ${origin.id}`);
+    }
+    return { ...message.model };
+  }
+  const selected = messages.findLast((message) => message.type === "assistant" || message.type === "model-switched");
+  return selected && "model" in selected ? { ...selected.model } : void 0;
+}
 async function connectToHost(ctx, sessionId, server) {
   if (ctx.app.version !== OPENCODE_VERSION) throw new LoopError("blocked", `OpenCode ${OPENCODE_VERSION} is required`);
   const origin = await ctx.session.get({ sessionID: sessionId }, request());
@@ -232,11 +245,10 @@ var OpenCodeAdapter = class {
   async catalog(project) {
     const location = { directory: project };
     await this.client.location.get({ location }, request());
-    const [info, agents, models, fallback] = await Promise.all([
+    const [info, agents, models] = await Promise.all([
       this.client.server.info(request()),
       this.client.agent.list({ location }, request()),
-      this.client.model.list({ location }, request()),
-      this.client.model.default({ location }, request())
+      this.client.model.list({ location }, request())
     ]);
     const skills = await this.client.skill.list({ location }, request());
     if (info.version !== OPENCODE_VERSION) throw new LoopError("blocked", `OpenCode ${OPENCODE_VERSION} is required; server reports ${info.version}`);
@@ -244,7 +256,6 @@ var OpenCodeAdapter = class {
       version: info.version,
       agents: agents.data,
       skills: skills.data,
-      ...fallback.data ? { defaultModel: { id: fallback.data.id, providerID: fallback.data.providerID } } : {},
       models: models.data.map((m) => ({ id: m.id, providerID: m.providerID, enabled: m.enabled, variants: m.variants.map((v) => v.id) }))
     };
   }
@@ -411,21 +422,26 @@ var actionSchema = z2.discriminatedUnion("action", [
   z2.strictObject({ action: z2.literal("stop"), runId })
 ]);
 var LoopService = class {
-  constructor(ctx, manager) {
+  constructor(ctx, manager, connect = connectToHost) {
     this.ctx = ctx;
     this.manager = manager;
+    this.connect = connect;
   }
   ctx;
   manager;
-  async execute(sessionId, input) {
+  connect;
+  async execute(sessionId, input, messageId) {
     const action = actionSchema.parse(input);
     const origin = await this.ctx.session.get({ sessionID: sessionId });
     if (origin.metadata?.openspecVerifyLoop) throw new LoopError("blocked", "Loop workers cannot invoke the loop management interface");
     const project = await projectRoot(origin.location.directory);
     const config = resolveConfig(this.ctx.options, project);
     if (action.action === "status") return this.manager.status(project, config, action.runId);
-    const { adapter } = await connectToHost(this.ctx, sessionId, config.server);
-    if (action.action === "run") return this.manager.start(project, config, adapter, action.change, { sessionId, model: origin.model });
+    const { adapter } = await this.connect(this.ctx, sessionId, config.server);
+    if (action.action === "run") {
+      const model = config.verifierModel && config.fixerModel ? void 0 : await resolveOriginModel(this.ctx, origin, messageId);
+      return this.manager.start(project, config, adapter, action.change, { sessionId, model });
+    }
     if (action.action === "resume") return this.manager.resume(project, config, adapter, action.runId, sessionId);
     return this.manager.stop(project, config, adapter, action.runId);
   }
@@ -607,8 +623,8 @@ function resolveWorkers(catalog, config, options = {}) {
   const models = {};
   for (const role of ["verifier", "fixer"]) {
     const override = role === "verifier" ? config.verifierModel : config.fixerModel;
-    const model = options.models?.[role] ?? (override ? parseModel(override) : options.originModel ?? build.model ?? catalog.defaultModel);
-    if (!model) throw new LoopError("blocked", `No ${role} model; select one in OpenCode or set the plugin's role model option`);
+    const model = options.models?.[role] ?? (override ? parseModel(override) : options.originModel);
+    if (!model) throw new LoopError("blocked", `Cannot inherit the initiating session's ${role} model; select a model in that session or set the plugin's ${role}Model option`);
     const available = catalog.models.find((m) => m.providerID === model.providerID && m.id === model.id && m.enabled);
     if (!available || model.variant && !available.variants.includes(model.variant)) {
       throw new LoopError("blocked", `Unavailable ${role} model ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`);
@@ -1055,11 +1071,16 @@ async function persistOutcome(s) {
     reason: s.reason,
     runDir: s.runDir,
     pending: s.pending ? { sessionId: s.pending.assignment.sessionId, role: s.pending.assignment.role } : void 0,
+    models: s.pins.models,
     workers: s.workers,
     requests: s.requests,
     activeMs: s.activeMs
   };
   await atomicWrite(join3(s.runDir, "final.json"), final);
+  const models = ["verifier", "fixer"].map((role) => {
+    const model = s.pins.models[role];
+    return `${role}: ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`;
+  }).join("\n");
   await atomicWrite(join3(s.runDir, "final.md"), `# OpenSpec verification loop: ${s.phase}
 
 ${s.reason ?? ""}
@@ -1067,6 +1088,9 @@ ${s.reason ?? ""}
 Change: ${s.pins.changeName}
 Run: ${s.runId}
 Reports: ${join3(s.runDir, "rounds")}
+
+Worker models:
+${models}
 `, true);
   return final;
 }
@@ -1145,7 +1169,7 @@ async function executeLoop(store, adapter, options = {}) {
     await rm2(join3(s.runDir, "final.md"), { force: true });
     delete s.reason;
     delete s.requests;
-    emit({ event: "started", runId: s.runId, runDir: s.runDir, change: s.pins.changeName });
+    emit({ event: "started", runId: s.runId, runDir: s.runDir, change: s.pins.changeName, models: s.pins.models });
     await checkPins(s.pins, s.config, adapter);
     while (true) {
       await guard();
@@ -1352,6 +1376,7 @@ function runSummary(state) {
     executor: state.executor,
     requests: state.requests,
     pending: state.pending ? { sessionId: state.pending.assignment.sessionId, role: state.pending.assignment.role } : void 0,
+    models: state.pins.models,
     workers: state.workers,
     unresolvedFindings: state.prior,
     reports: join4(state.runDir, "rounds")
@@ -1530,7 +1555,7 @@ async function registerTool(ctx, service) {
       });
       let result;
       try {
-        result = await service.execute(tool.sessionID, action);
+        result = await service.execute(tool.sessionID, action, tool.messageID);
       } catch (error) {
         result = failureResult(error);
       }

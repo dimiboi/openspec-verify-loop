@@ -10,6 +10,8 @@ import { resolveConfig } from '../src/config.js';
 import { MANAGEMENT_TOOL, workerPermissions } from '../src/workers.js';
 import { LoopService } from '../src/service.js';
 import { RunManager } from '../src/manager.js';
+import { registerTool } from '../src/tools.js';
+import { fixture, FakeAdapter } from './fixtures.js';
 
 type Definition = {name: string; execute(input: any, context?: any): Promise<any>};
 function fakeHost(stateDir: string) {
@@ -75,6 +77,47 @@ test('native registrations load packaged instructions and commands/tools share t
   await cleanup();
   await cleanup();
   assert.equal(host.disposals(), 4);
+});
+test('management tool carries the generating message identity into the service', async () => {
+  const host = fakeHost('/unused');
+  const calls: unknown[] = [];
+  const service = {execute: async (...args: unknown[]) => {calls.push(args); return {outcome: 'started'};}} as unknown as LoopService;
+  const registration = await registerTool(host.ctx, service);
+  await host.tools[0]!.execute({action: 'run'}, {sessionID: 'parent', messageID: 'invoking', agent: 'build', id: 'call'});
+  assert.deepEqual(calls, [['parent', {action: 'run'}, 'invoking']]);
+  await registration.dispose();
+});
+test('skill tool starts workers with the parent turn model when the session has no model', async t => {
+  const f = await fixture(); t.after(() => rm(f.base, {recursive: true, force: true}));
+  const host = fakeHost(f.stateDir);
+  const model = {providerID: 'lmstudio', id: 'recursivesi/flint', variant: 'default'};
+  host.history([{type: 'assistant', id: 'invoking', model}]);
+  const ctx = {...host.ctx, session: {...host.ctx.session,
+    get: async ({sessionID}: {sessionID: string}) => ({id: sessionID, location: {directory: f.project}, metadata: {}}),
+  }} as unknown as Plugin.Context;
+  const adapter = new FakeAdapter();
+  const catalog = await adapter.catalog(f.project);
+  adapter.catalog = async () => ({...catalog, models: [...catalog.models, {...model, enabled: true, variants: ['default']}]});
+  const manager = new RunManager({lockRoot: f.lockRoot, pollMs: 1});
+  t.after(() => manager.close());
+  const service = new LoopService(ctx, manager, async (_ctx, sessionId) => {
+    assert.equal(sessionId, 'parent');
+    return {adapter};
+  });
+  const registration = await registerTool(ctx, service);
+  t.after(() => registration.dispose());
+  const result = JSON.parse((await host.tools[0]!.execute({action: 'run'},
+    {sessionID: 'parent', messageID: 'invoking', agent: 'build', id: 'call'})).content);
+  assert.equal(result.outcome, 'started');
+  assert.deepEqual(result.models, {verifier: model, fixer: model});
+  await manager.wait(f.project);
+  assert.equal(adapter.seen.length, 1);
+  assert.deepEqual(adapter.seen[0]!.model, model);
+  // Missing invocation evidence blocks before creating another worker.
+  const blocked = JSON.parse((await host.tools[0]!.execute({action: 'run'},
+    {sessionID: 'parent', messageID: 'missing', agent: 'build', id: 'other-call'})).content);
+  assert.equal(blocked.outcome, 'blocked');
+  assert.equal(adapter.creations, 1);
 });
 test('owned workers cannot enter the service; reporting turns have no tools while ordinary turns keep them', async () => {
   const host = fakeHost('/unused');

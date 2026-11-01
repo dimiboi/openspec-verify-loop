@@ -35,6 +35,23 @@ export function parseModel(input: string): Model {
   return {providerID: input.slice(0, slash), id, ...(variant ? {variant} : {})};
 }
 
+/** A tool call belongs to its generating turn, even if the client switches models while it waits. */
+export async function resolveOriginModel(ctx: Pick<Plugin.Context, 'session'>, origin: SessionInfo, messageId?: string): Promise<Model | undefined> {
+  if (!messageId && origin.model) return {...origin.model};
+  const messages = await ctx.session.context({sessionID: origin.id}, request());
+  if (messageId) {
+    const message = messages.find(message => message.id === messageId);
+    if (message?.type !== 'assistant') {
+      throw new LoopError('blocked', `Cannot identify the invoking model for message ${messageId} in session ${origin.id}`);
+    }
+    return {...message.model};
+  }
+  // Native commands have no assistant turn. Recover the last effective selection
+  // from this session when its optional model field has not been populated.
+  const selected = messages.findLast(message => message.type === 'assistant' || message.type === 'model-switched');
+  return selected && 'model' in selected ? {...selected.model} : undefined;
+}
+
 /** Bind the recovery client to this plugin's hosting server; never manage a service. */
 export async function connectToHost(ctx: Pick<Plugin.Context, 'app' | 'session'>, sessionId: string, server?: string) {
   if (ctx.app.version !== OPENCODE_VERSION) throw new LoopError('blocked', `OpenCode ${OPENCODE_VERSION} is required`);
@@ -72,15 +89,13 @@ export class OpenCodeAdapter implements Adapter {
   async catalog(project: string): Promise<Catalog> {
     const location = {directory: project};
     await this.client.location.get({location}, request());
-    const [info, agents, models, fallback] = await Promise.all([
+    const [info, agents, models] = await Promise.all([
       this.client.server.info(request()), this.client.agent.list({location}, request()),
       this.client.model.list({location}, request()),
-      this.client.model.default({location}, request()),
     ]);
     const skills = await this.client.skill.list({location}, request());
     if (info.version !== OPENCODE_VERSION) throw new LoopError('blocked', `OpenCode ${OPENCODE_VERSION} is required; server reports ${info.version}`);
     return {version: info.version, agents: agents.data, skills: skills.data,
-      ...(fallback.data ? {defaultModel: {id: fallback.data.id, providerID: fallback.data.providerID}} : {}),
       models: models.data.map(m => ({id: m.id, providerID: m.providerID, enabled: m.enabled, variants: m.variants.map(v => v.id)}))};
   }
   async ensureSession(a: Assignment) {

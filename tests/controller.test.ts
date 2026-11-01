@@ -7,12 +7,12 @@ import { configSchema } from '../src/config.js';
 import { RunStore, loadRun } from '../src/state.js';
 import { selectTarget } from '../src/openspec.js';
 import { command, exists } from '../src/util.js';
-import { fixture, FakeAdapter, verifier, fixer, findings } from './fixtures.js';
+import { fixtureConfig, fixture, FakeAdapter, verifier, fixer, findings } from './fixtures.js';
 
 test('clean first verifier saves evidence and never creates a fixer',async t=>{
   const f=await fixture();t.after(()=>rm(f.base,{recursive:true,force:true}));
   const adapter=new FakeAdapter();
-  const s=await createRun(f.project,configSchema.parse({stateDir:f.stateDir,checks:[{id:'tests',command:['node','--test','greet.test.mjs']}]}),adapter,undefined,{lockRoot:f.lockRoot,pollMs:1});
+  const s=await createRun(f.project,fixtureConfig({stateDir:f.stateDir,checks:[{id:'tests',command:['node','--test','greet.test.mjs']}]}),adapter,undefined,{lockRoot:f.lockRoot,pollMs:1});
   assert.equal(s.phase,'clean');assert.equal(adapter.creations,1);assert.equal(adapter.seen[0]!.role,'verifier');
   const final=JSON.parse(await readFile(join(s.runDir,'final.json'),'utf8'));
   assert.equal(final.outcome,'clean');
@@ -38,27 +38,36 @@ test('full verify/fix/verify passes every severity and uses three fresh sessions
     const r=a.round===1?verifier(a,{outcome:'findings',findings}):verifier(a,{priorFindingResolutions:findings.map(f=>({findingId:f.id,status:'resolved',evidence:['greet.mjs and passing test'],reason:''}))});
     return {status:'completed',text:JSON.stringify(r),messageId:`verify-${a.round}`};
   });
-  const s=await createRun(f.project,configSchema.parse({stateDir:f.stateDir,checks:[{id:'test',command:['node','--test','greet.test.mjs']}]}),adapter,undefined,{lockRoot:f.lockRoot,pollMs:1});
+  const originModel = {providerID:'lmstudio',id:'recursivesi/flint',variant:'default'};
+  const catalog = await adapter.catalog(f.project);
+  adapter.catalog = async () => ({...catalog, models:[...catalog.models,{...originModel,enabled:true,variants:['default']}]});
+  const events: any[] = [];
+  const s=await createRun(f.project,configSchema.parse({stateDir:f.stateDir,checks:[{id:'test',command:['node','--test','greet.test.mjs']}]}),adapter,undefined,{lockRoot:f.lockRoot,pollMs:1,originModel,emit:event=>events.push(event)});
   assert.equal(s.phase,'clean',s.reason ?? '');assert.equal(adapter.creations,3);assert.equal(new Set(adapter.seen.map(a=>a.sessionId)).size,3);
   assert.deepEqual(adapter.seen.map(a=>a.role),['verifier','fixer','verifier']);
+  assert(adapter.seen.every(a=>JSON.stringify(a.model)===JSON.stringify(originModel)));
+  const models = {verifier:originModel,fixer:originModel};
+  assert.deepEqual(events.find(event=>event.event==='started').models,models);
+  assert.deepEqual(JSON.parse(await readFile(join(s.runDir,'final.json'),'utf8')).models,models);
+  assert.match(await readFile(join(s.runDir,'final.md'),'utf8'),/verifier: lmstudio\/recursivesi\/flint#default/);
   assert.equal(await readFile(join(f.project,'unrelated.txt'),'utf8'),'preserve me');
 });
 test('independent failing check rejects a claimed clean result',async t=>{
   const f=await fixture({broken:true});t.after(()=>rm(f.base,{recursive:true,force:true}));
-  const s=await createRun(f.project,configSchema.parse({stateDir:f.stateDir,checks:[{id:'test',command:['node','--test','greet.test.mjs']}]}),new FakeAdapter(),undefined,{lockRoot:f.lockRoot});
+  const s=await createRun(f.project,fixtureConfig({stateDir:f.stateDir,checks:[{id:'test',command:['node','--test','greet.test.mjs']}]}),new FakeAdapter(),undefined,{lockRoot:f.lockRoot});
   assert.equal(s.phase,'failed');assert.match(s.reason!,/independent evidence/);
 });
 test('verifier source mutation invalidates the outcome',async t=>{
   const f=await fixture();t.after(()=>rm(f.base,{recursive:true,force:true}));
   const a=new FakeAdapter(async task=>{await writeFile(join(f.project,'greet.mjs'),'unexpected edit');return {status:'completed',text:JSON.stringify(verifier(task)),messageId:'final'};});
-  const s=await createRun(f.project,configSchema.parse({stateDir:f.stateDir}),a,undefined,{lockRoot:f.lockRoot});
+  const s=await createRun(f.project,fixtureConfig({stateDir:f.stateDir}),a,undefined,{lockRoot:f.lockRoot});
   assert.equal(s.phase,'blocked');assert.match(s.reason!,/changed during verification/);
 });
 test('permission wait reserves checkout; resume reconciles the same worker without another prompt',async t=>{
   const f=await fixture();t.after(()=>rm(f.base,{recursive:true,force:true}));
   let waiting=true;
   const adapter=new FakeAdapter(a=>waiting?{status:'awaiting_input',requests:[{id:'permission-1'}]}:{status:'completed',text:JSON.stringify(verifier(a)),messageId:'done'});
-  const config=configSchema.parse({stateDir:f.stateDir});
+  const config=fixtureConfig({stateDir:f.stateDir});
   const options={lockRoot:f.lockRoot,pollMs:1};
   const s=await createRun(f.project,config,adapter,undefined,options);
   assert.equal(s.phase,'awaiting_input');assert(s.pending);
@@ -77,7 +86,7 @@ test('lost admission response recovers known input without resubmitting',async t
     }
   }
   const adapter=new LostResponse();
-  const s=await createRun(f.project,configSchema.parse({stateDir:f.stateDir}),adapter,undefined,{lockRoot:f.lockRoot,pollMs:1});
+  const s=await createRun(f.project,fixtureConfig({stateDir:f.stateDir}),adapter,undefined,{lockRoot:f.lockRoot,pollMs:1});
   assert.equal(s.phase,'failed');assert.equal(s.pending?.stage,'admitting');
   const done=await resumeRun(new RunStore(await loadRun(s.runDir,f.project),f.lockRoot),adapter,{lockRoot:f.lockRoot,pollMs:1});
   assert.equal(done.phase,'clean');assert.equal(adapter.submissions,1);
@@ -88,7 +97,7 @@ test('unknown admission never re-prompts and retains its reservation',async t=>{
     override async ensurePrompt() {throw new Error('Unknown admission');}
   }
   const adapter=new UnknownResponse();
-  const s=await createRun(f.project,configSchema.parse({stateDir:f.stateDir}),adapter,undefined,{lockRoot:f.lockRoot});
+  const s=await createRun(f.project,fixtureConfig({stateDir:f.stateDir}),adapter,undefined,{lockRoot:f.lockRoot});
   const resumed=await resumeRun(new RunStore(await loadRun(s.runDir,f.project),f.lockRoot),adapter,{lockRoot:f.lockRoot});
   assert.equal(resumed.phase,'failed');assert.equal(adapter.submissions,0);assert(resumed.pending);
   await assert.rejects(stopRun(new RunStore(resumed,f.lockRoot),adapter),/Unknown admission/);
@@ -96,7 +105,7 @@ test('unknown admission never re-prompts and retains its reservation',async t=>{
 test('changed procedure during a saved wait blocks recovery',async t=>{
   const f=await fixture();t.after(()=>rm(f.base,{recursive:true,force:true}));
   const adapter=new FakeAdapter(()=>({status:'awaiting_input',requests:[{id:'question'}]}));
-  const s=await createRun(f.project,configSchema.parse({stateDir:f.stateDir}),adapter,undefined,{lockRoot:f.lockRoot});
+  const s=await createRun(f.project,fixtureConfig({stateDir:f.stateDir}),adapter,undefined,{lockRoot:f.lockRoot});
   await writeFile(join(f.project,'.opencode/skills/openspec-verify-change/SKILL.md'),'changed procedure');
   const resumed=await resumeRun(new RunStore(await loadRun(s.runDir,f.project),f.lockRoot),adapter,{lockRoot:f.lockRoot});
   assert.equal(resumed.phase,'blocked');assert.match(resumed.reason!,/Pinned/);assert.equal(adapter.submissions,1);
@@ -104,14 +113,14 @@ test('changed procedure during a saved wait blocks recovery',async t=>{
 test('round limit is unsuccessful even when the fixer reports completion',async t=>{
   const f=await fixture();t.after(()=>rm(f.base,{recursive:true,force:true}));
   const adapter=new FakeAdapter(a=>({status:'completed',text:JSON.stringify(a.role==='fixer'?fixer(a):verifier(a,{outcome:'findings',findings})),messageId:'result'}));
-  const s=await createRun(f.project,configSchema.parse({stateDir:f.stateDir,maxRounds:1}),adapter,undefined,{lockRoot:f.lockRoot});
+  const s=await createRun(f.project,fixtureConfig({stateDir:f.stateDir,maxRounds:1}),adapter,undefined,{lockRoot:f.lockRoot});
   assert.equal(s.phase,'limited');assert.equal(adapter.submissions,2);
 });
 test('two unchanged fix cycles stop and preserve reports',async t=>{
   const f=await fixture();t.after(()=>rm(f.base,{recursive:true,force:true}));
   const adapter=new FakeAdapter(a=>({status:'completed',text:JSON.stringify(a.role==='fixer'?fixer(a):verifier(a,{outcome:'findings',findings,
     priorFindingResolutions:a.round>1?findings.map(f=>({findingId:f.id,status:'unresolved',evidence:[],reason:'Still present'})):[]})),messageId:'result'}));
-  const s=await createRun(f.project,configSchema.parse({stateDir:f.stateDir}),adapter,undefined,{lockRoot:f.lockRoot});
+  const s=await createRun(f.project,fixtureConfig({stateDir:f.stateDir}),adapter,undefined,{lockRoot:f.lockRoot});
   assert.equal(s.phase,'blocked');assert.match(s.reason!,/no demonstrable progress/);assert.equal(adapter.submissions,4);
 });
 test('ambiguous and absent changes never dispatch a worker',async t=>{
@@ -133,7 +142,7 @@ test('a full subsequent verifier can discover a new regression and trigger anoth
     const report=verifier(a,{outcome:a.round===3?'clean':'findings',findings:a.round===3?[]:[findings[a.round-1]!],priorFindingResolutions:previous});
     return {status:'completed',text:JSON.stringify(report),messageId:`verify-${a.round}`};
   });
-  const s=await createRun(f.project,configSchema.parse({stateDir:f.stateDir}),adapter,undefined,{lockRoot:f.lockRoot});
+  const s=await createRun(f.project,fixtureConfig({stateDir:f.stateDir}),adapter,undefined,{lockRoot:f.lockRoot});
   assert.equal(s.phase,'clean',s.reason??'');assert.equal(adapter.creations,5);
   assert.deepEqual(adapter.seen.map(a=>a.role),['verifier','fixer','verifier','fixer','verifier']);
 });
@@ -147,6 +156,6 @@ test('an out-of-scope worker commit invalidates verification instead of being ac
     }
     return {status:'completed',text:JSON.stringify(verifier(a,{outcome:'findings',findings})),messageId:'verify'};
   });
-  const s=await createRun(f.project,configSchema.parse({stateDir:f.stateDir}),adapter,undefined,{lockRoot:f.lockRoot});
+  const s=await createRun(f.project,fixtureConfig({stateDir:f.stateDir}),adapter,undefined,{lockRoot:f.lockRoot});
   assert.equal(s.phase,'blocked');assert.match(s.reason!,/HEAD changed/);assert.equal(adapter.submissions,2);
 });

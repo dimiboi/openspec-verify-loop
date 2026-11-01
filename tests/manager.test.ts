@@ -2,9 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rm, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fixture, FakeAdapter } from './fixtures.js';
+import { fixtureConfig, fixture, FakeAdapter } from './fixtures.js';
 import { RunManager } from '../src/manager.js';
-import { configSchema } from '../src/config.js';
 import { delay } from '../src/util.js';
 
 async function dispatched(adapter: FakeAdapter) {
@@ -14,7 +13,7 @@ async function dispatched(adapter: FakeAdapter) {
 test('manager owns lifecycle, responds to stop, and recovers safely across generations in the same process', async t => {
   const f = await fixture(); t.after(() => rm(f.base, {recursive: true, force: true}));
   const options = {lockRoot: f.lockRoot, pollMs: 1, stopWaitMs: 5};
-  const config = configSchema.parse({stateDir: f.stateDir});
+  const config = fixtureConfig({stateDir: f.stateDir});
   await t.test('start is acknowledged before worker completion and stop uses the owning task', async () => {
     const manager = new RunManager(options);
     const adapter = new FakeAdapter(() => ({status: 'running'}));
@@ -32,17 +31,23 @@ test('manager owns lifecycle, responds to stop, and recovers safely across gener
   await t.test('unload drains an awaiting-input worker and a new generation can resume', async () => {
     const first = new RunManager(options);
     const waiting = new FakeAdapter(() => ({status: 'awaiting_input', requests: [{id: 'permission'}]}));
-    const run = await first.start(f.project, config, waiting);
+    const inheritedConfig = fixtureConfig({stateDir: f.stateDir, verifierModel: undefined, fixerModel: undefined});
+    const originModel = {providerID: 'fake', id: 'test', variant: 'default'};
+    const run = await first.start(f.project, inheritedConfig, waiting, undefined, {sessionId: 'parent', model: originModel});
+    assert.deepEqual(run.models, {verifier: originModel, fixer: originModel});
     await first.wait(f.project);
-    assert.equal((await first.status(f.project, config, run.runId) as any).outcome, 'awaiting_input');
+    assert.equal((await first.status(f.project, inheritedConfig, run.runId) as any).outcome, 'awaiting_input');
     await first.close();
     assert.equal(waiting.interrupts, 1);
     const second = new RunManager(options);
     assert.notEqual(first.runtimeId, second.runtimeId);
     const worker = new FakeAdapter();
-    await second.resume(f.project, config, worker, run.runId, 'new-parent');
+    const catalog = await worker.catalog(f.project);
+    worker.catalog = async () => ({...catalog, defaultModel: {providerID: 'different', id: 'default'}});
+    await second.resume(f.project, inheritedConfig, worker, run.runId, 'new-parent');
     await second.wait(f.project);
-    assert.equal((await second.status(f.project, config, run.runId) as any).outcome, 'clean');
+    assert.equal((await second.status(f.project, inheritedConfig, run.runId) as any).outcome, 'clean');
+    assert.deepEqual(worker.seen[0]!.model, originModel);
     assert.notEqual(worker.seen[0]!.sessionId, waiting.seen[0]!.sessionId);
     await second.close();
   });
@@ -72,7 +77,7 @@ test('manager owns lifecycle, responds to stop, and recovers safely across gener
   });
   await t.test('cancelling a configured check stays responsive and prevents worker dispatch', async () => {
     const marker = join(f.base, 'check-started');
-    const configWithCheck = configSchema.parse({stateDir: f.stateDir, checks: [{id: 'slow', command: [process.execPath,
+    const configWithCheck = fixtureConfig({stateDir: f.stateDir, checks: [{id: 'slow', command: [process.execPath,
       '-e', `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'started'); setInterval(() => {}, 100);`]}]});
     const manager = new RunManager(options), worker = new FakeAdapter();
     const run = await manager.start(f.project, configWithCheck, worker);

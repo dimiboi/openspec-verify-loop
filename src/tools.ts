@@ -18,7 +18,7 @@ export async function registerTool(ctx: Plugin.Context, service: LoopService) {
         action: MANAGEMENT_TOOL, resources: [action.action],
         source: {type: 'tool', messageID: tool.messageID, id: tool.id}});
       let result: unknown;
-      try { result = await service.execute(tool.sessionID, action); }
+      try { result = await service.execute(tool.sessionID, action, tool.messageID); }
       catch (error) { result = failureResult(error); }
       return {content: JSON.stringify(result)};
     },

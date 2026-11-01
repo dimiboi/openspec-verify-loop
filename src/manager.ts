@@ -11,7 +11,7 @@ export function runSummary(state: RunState) {
   return {outcome: state.phase, runId: state.runId, runDir: state.runDir, change: state.pins.changeName,
     round: state.round, reason: state.reason, executor: state.executor, requests: state.requests,
     pending: state.pending ? {sessionId: state.pending.assignment.sessionId, role: state.pending.assignment.role} : undefined,
-    workers: state.workers, unresolvedFindings: state.prior, reports: join(state.runDir, 'rounds')};
+    models: state.pins.models, workers: state.workers, unresolvedFindings: state.prior, reports: join(state.runDir, 'rounds')};
 }
 type Task = {store: RunStore; abort: AbortController; promise: Promise<void>};
 export type ManagerOptions = Pick<LoopOptions, 'lockRoot' | 'pollMs'> & {

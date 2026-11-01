@@ -5,6 +5,13 @@ import assert from 'node:assert/strict';
 import { command, OPENCODE_VERSION } from '../src/util.js';
 import type { Adapter, Assignment, Catalog, Observation } from '../src/opencode.js';
 import type { FixerReport, VerifierReport } from '../src/reports.js';
+import type { z } from 'zod';
+import { configSchema } from '../src/config.js';
+
+/** Unrelated controller tests select explicit fake models, never a host default. */
+export function fixtureConfig(options: z.input<typeof configSchema> = {}) {
+  return configSchema.parse({verifierModel: 'fake/test', fixerModel: 'fake/test', ...options});
+}
 
 export async function fixture(options: {realSkill?: boolean; broken?: boolean; root?: string} = {}) {
   const basePath = options.root ?? await mkdtemp(join(tmpdir(), 'openspec-loop-'));

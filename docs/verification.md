@@ -20,6 +20,9 @@ ownership, same-process generation handover, and pending-worker cleanup.
 Native interface tests cover command parsing, plugin registrations/disposal,
 worker recursion rejection, tool-free reporting turns, host endpoint identity,
 model references, options validation, and resource paths.
+Model regressions cover the invoking assistant's model/variant, absent session
+model fields, later model switches, explicit role overrides, missing/unavailable
+models without default substitution, and pinned selections across rounds/resume.
 The Git-packaging regression uses npm's resolver against a local Git fixture. It
 reproduces preparation failure with a `build` script, then verifies that the
 package ships its prebuilt entrypoint and skill without starting child npm.
@@ -43,6 +46,9 @@ For GitHub installation, use a pushed ref that contains the plugin entrypoint.
 3. Run `/verify-loop <change>`. Check the run ID/report path, findings report,
    distinct fixer session, and distinct second verifier. A clean outcome must have
    zero findings, explicit prior resolutions, and independent passing checks.
+   Repeat by invoking the bundled skill in conversation with a model/variant
+   different from the build/server default. Confirm both worker models in the
+   start/status result and final reports match the invoking model and variant.
 4. Open a worker permission/question request. Confirm `awaiting_input`, answer in
    that worker session, and explicitly resume. The saved input must not be replayed.
 5. Stop an active run, then check status and confirm termination before restarting.

@@ -8,6 +8,11 @@ Call the installed `openspec_verify_loop` tool directly. The plugin owns the loo
 and creates fresh sequential verifier/fixer sessions. Its result includes the
 run ID and saved report directory; report them immediately.
 
+Workers inherit the invoking turn's model and variant unless explicit role model
+options override them. The selection is pinned across rounds and resume. If it
+cannot be identified or is unavailable, report the blocker; do not switch to a
+default model. Start/status results include the selected worker models.
+
 - Start: `{ "action": "run" }`, optionally with `"change": "name"`.
 - Inspect: `{ "action": "status" }`, optionally with `"runId": "run_..."`.
 - Resume: `{ "action": "resume", "runId": "run_..." }`.

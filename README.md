@@ -109,10 +109,13 @@ Set options in the native plugin entry:
 }
 ```
 
-All options are optional. Model precedence is role option, initiating session's
-selected model, the build profile's model, then the project's OpenCode default.
+All options are optional. Workers inherit the initiating turn's model and variant
+unless a role model option explicitly overrides them. Native commands use the
+initiating session's selected model. The plugin blocks if it cannot identify an
+inherited model; it never substitutes the build profile or server default.
 Selections and variants are pinned for the run; changing the chat's selected
-model does not change existing workers. Unavailable models fail without substitution.
+model does not change existing workers or resumed runs. Status, start results,
+and final reports include both worker models. Unavailable models fail without substitution.
 
 Check commands are argument arrays executed without a shell before each verifier.
 `cwd` defaults to the consuming checkout and must remain inside it; `timeoutMs`

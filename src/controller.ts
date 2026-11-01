@@ -18,9 +18,13 @@ async function persistEvidence(s: RunState, round: number, evidence?: Evidence) 
 async function persistOutcome(s: RunState) {
   const final = {outcome:s.phase,runId:s.runId,change:s.pins.changeName,rounds:s.workers.filter(w=>w.role==='verifier').length,
     reason:s.reason,runDir:s.runDir,pending:s.pending ? {sessionId:s.pending.assignment.sessionId,role:s.pending.assignment.role} : undefined,
-    workers:s.workers,requests:s.requests,activeMs:s.activeMs};
+    models:s.pins.models,workers:s.workers,requests:s.requests,activeMs:s.activeMs};
   await atomicWrite(join(s.runDir,'final.json'),final);
-  await atomicWrite(join(s.runDir,'final.md'),`# OpenSpec verification loop: ${s.phase}\n\n${s.reason ?? ''}\n\nChange: ${s.pins.changeName}\nRun: ${s.runId}\nReports: ${join(s.runDir,'rounds')}\n`,true);
+  const models = (['verifier', 'fixer'] as const).map(role => {
+    const model = s.pins.models[role];
+    return `${role}: ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ''}`;
+  }).join('\n');
+  await atomicWrite(join(s.runDir,'final.md'),`# OpenSpec verification loop: ${s.phase}\n\n${s.reason ?? ''}\n\nChange: ${s.pins.changeName}\nRun: ${s.runId}\nReports: ${join(s.runDir,'rounds')}\n\nWorker models:\n${models}\n`,true);
   return final;
 }
 export async function prepareRun(project: string, config: Config, adapter: Adapter, change?: string, options: LoopOptions = {}) {
@@ -76,7 +80,7 @@ export async function executeLoop(store: RunStore, adapter: Adapter, options: Lo
     await rm(join(s.runDir, 'final.json'), {force:true});
     await rm(join(s.runDir, 'final.md'), {force:true});
     delete s.reason; delete s.requests;
-    emit({event:'started',runId:s.runId,runDir:s.runDir,change:s.pins.changeName});
+    emit({event:'started',runId:s.runId,runDir:s.runDir,change:s.pins.changeName,models:s.pins.models});
     await checkPins(s.pins, s.config, adapter);
     while (true) {
       await guard();

@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { OpenCodeClient, SessionInfo } from '@opencode/client';
+import type { Plugin } from '@opencode/plugin';
 import { workerPermissions } from '../src/workers.js';
-import { OpenCodeAdapter, parseModel, assertHostingServer, type Assignment } from '../src/opencode.js';
+import { OpenCodeAdapter, parseModel, assertHostingServer, resolveOriginModel, type Assignment } from '../src/opencode.js';
 
 const a: Assignment={sessionId:'ses_a',inputId:'msg_a',runId:'run_a',role:'verifier',round:1,agent:'verifier',project:'/tmp/project',
   model:{providerID:'fake',id:'test'},permissions:workerPermissions('verifier'),prompt:'verify'};
@@ -24,6 +25,46 @@ function adapterWith(options: {messages?:unknown[]; forms?:unknown[];permissions
 test('model references preserve nested model IDs and explicit variants',()=>{
   assert.deepEqual(parseModel('openrouter/vendor/model#high'),{providerID:'openrouter',id:'vendor/model',variant:'high'});
   assert.throws(()=>parseModel('missing-provider'));assert.throws(()=>parseModel('provider/model#'));
+});
+test('tool workers inherit the invoking assistant model even after a session model switch', async () => {
+  const model = {providerID: 'lmstudio', id: 'recursivesi/flint', variant: 'default'};
+  const newer = {providerID: 'other', id: 'different', variant: 'high'};
+  const origin = {id: 'parent', model: newer} as SessionInfo;
+  const ctx = {session: {context: async ({sessionID}: {sessionID: string}) => {
+    assert.equal(sessionID, origin.id);
+    return [{type: 'assistant', id: 'invoking', model}, {type: 'model-switched', id: 'switch', model: newer}];
+  }}} as unknown as Plugin.Context;
+  assert.deepEqual(await resolveOriginModel(ctx, origin, 'invoking'), model);
+  assert.deepEqual(await resolveOriginModel(ctx, {...origin, model: undefined}, 'invoking'), model);
+  await assert.rejects(resolveOriginModel(ctx, origin, 'missing'), /Cannot identify the invoking model/);
+});
+test('native commands inherit session selections or session history without guessing a default', async () => {
+  const model = {providerID: 'lmstudio', id: 'recursivesi/flint', variant: 'default'};
+  const origin = {id: 'parent', model} as SessionInfo;
+  let history: unknown[] = [];
+  let reads = 0;
+  const ctx = {session: {context: async () => {reads++; return history;}}} as unknown as Plugin.Context;
+  assert.deepEqual(await resolveOriginModel(ctx, origin), model);
+  assert.equal(reads, 0);
+  delete origin.model;
+  assert.equal(await resolveOriginModel(ctx, origin), undefined);
+  // Compaction has its own model; it must not replace the parent agent's model.
+  history = [{type: 'assistant', model}, {type: 'compaction', model: {providerID: 'other', id: 'summary'}}];
+  assert.deepEqual(await resolveOriginModel(ctx, origin), model);
+  history.push({type: 'model-switched', model: {...model, variant: 'high'}});
+  assert.deepEqual(await resolveOriginModel(ctx, origin), {...model, variant: 'high'});
+});
+test('catalog discovery does not resolve a server default model', async () => {
+  const client = {
+    location: {get: async () => ({})}, server: {info: async () => ({version: '2.2.5'})},
+    agent: {list: async () => ({data: []})}, skill: {list: async () => ({data: []})},
+    model: {
+      list: async () => ({data: [{id: 'local', providerID: 'lmstudio', enabled: true, variants: [{id: 'default'}]}]}),
+      default: async () => {throw new Error('Default resolution must not be needed');},
+    },
+  } as unknown as OpenCodeClient;
+  assert.deepEqual((await new OpenCodeAdapter(client).catalog('/consumer')).models,
+    [{id: 'local', providerID: 'lmstudio', enabled: true, variants: ['default']}]);
 });
 test('submission reconciliation never restarts a completed worker',async()=>{
   const {adapter,submissions}=adapterWith();await adapter.ensurePrompt(a,false);assert.equal(submissions(),0);
