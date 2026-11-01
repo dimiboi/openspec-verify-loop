@@ -13,7 +13,7 @@ test('origin models are pinned independently of later defaults and worker policy
   let catalog: Catalog = await adapter.catalog(f.project);
   catalog = {...catalog,
     agents: catalog.agents.map(agent => ({...agent, model: {providerID: 'fake', id: 'test'}})),
-    models: [...catalog.models, {...originModel, enabled: true, variants: ['default']}]};
+    models: [...catalog.models, {...originModel, enabled: true, variants: ['medium']}]};
   adapter.catalog = async () => catalog;
   const target = await selectTarget(f.project);
   const config = configSchema.parse({stateDir: f.stateDir});

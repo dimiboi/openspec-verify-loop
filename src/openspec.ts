@@ -90,7 +90,8 @@ function resolveWorkers(catalog: Catalog, config: Config, options: {originModel?
     const model = options.models?.[role] ?? (override ? parseModel(override) : options.originModel);
     if (!model) throw new LoopError('blocked', `Cannot inherit the initiating session's ${role} model; select a model in that session or set the plugin's ${role}Model option`);
     const available = catalog.models.find(m => m.providerID === model.providerID && m.id === model.id && m.enabled);
-    if (!available || (model.variant && !available.variants.includes(model.variant))) {
+    // Hosts report the implicit base configuration as variant "default" without listing it.
+    if (!available || (model.variant && model.variant !== 'default' && !available.variants.includes(model.variant))) {
       throw new LoopError('blocked', `Unavailable ${role} model ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ''}`);
     }
     models[role] = model;
