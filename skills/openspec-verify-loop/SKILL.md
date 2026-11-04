@@ -1,44 +1,81 @@
 ---
 name: openspec-verify-loop
-description: Run iterative OpenSpec verification and fixes until every critical issue, warning, suggestion, and applicable unverified check is resolved. Use for /verify-loop and explicit OpenSpec verify/fix loops; use openspec-verify-change for a one-pass review.
-compatibility: Native openspec-verify-loop plugin on OpenCode 2.2.5, OpenSpec 1.16.0, and a repo-local OpenSpec change in a Git checkout.
+description: Run the installed openspec-verify-change procedure, fix every finding with a fresh worker, and repeat until a fresh verification is clean, as a bb workflow using this thread's model. Use for /openspec-verify-loop or an explicit iterative OpenSpec verify/fix request, not a one-pass review. A completion notice only reports; it never starts another run.
 ---
 
-Call the installed `openspec_verify_loop` tool directly. The plugin owns the loop
-and creates fresh sequential verifier/fixer sessions. Its result includes the
-run ID and saved report directory; report them immediately.
+# OpenSpec verification loop
 
-Workers inherit the invoking turn's model and variant unless explicit role model
-options override them. The selection is pinned across rounds and resume. If it
-cannot be identified or is unavailable, report the blocker; do not switch to a
-default model. Start/status results include the selected worker models.
+This skill starts one bb workflow that runs `verify-loop.js`, next to this file.
+Each round a fresh verifier runs the `openspec-verify-change` procedure; when it
+finds issues, a fresh fixer receives the full report and fixes everything. The
+loop ends `clean`, `unverified`, `blocked`, or at the round limit (`limit`,
+default 5).
+Workers inherit this thread's provider, model, reasoning and permission mode.
 
-- Start: `{ "action": "run" }`, optionally with `"change": "name"`.
-- Inspect: `{ "action": "status" }`, optionally with `"runId": "run_..."`.
-- Resume: `{ "action": "resume", "runId": "run_..." }`.
-- Stop: `{ "action": "stop", "runId": "run_..." }`.
+## Precondition
 
-Use the explicitly requested change, or one clearly identified in conversation.
-Otherwise omit `change`; exactly one active change is selected automatically.
-For `selection_required`, present every returned candidate and ask for a choice.
-For `no_active_change`, report that there is nothing to verify. Never choose by
-recency or change completion percentage.
+Start only from a thread in `auto` or `full` mode. Workers are hidden threads,
+so a mode that asks before shell commands, such as `accept-edits`, stalls them
+on the first approval. ACP providers such as local Flint offer only
+`accept-edits` and `full`, so they need `full`. The Workflows plugin must be
+enabled (`bb plugin enable workflows`).
 
-Work continues in the server after start returns. Use status when requested;
-do not run a second loop or manually reproduce worker sequencing. Final session
-notices report completion. Read saved reports when the user needs details.
+Choosing the mode is the user's job. You cannot read your own permission mode,
+so do not try: do not look through `bb` settings, guides or thread options for
+it. State the requirement once in your reply after launching.
 
-For `awaiting_input`, show the exact worker session and pending permission or
-question. The user answers there, then explicitly resumes. Never grant approval
-or replace a waiting worker yourself. For `stopping`, inspect status until
-termination is confirmed before starting another run. Changed requirements,
-procedure, worker policy, or configuration need review and a new run.
+## Start
 
-Only `clean` means a fresh full verifier found zero findings at every severity,
-with evidenced prior resolutions and passing applicable checks. Report blockers,
-failures, interruption, and limits accurately. Do not commit, archive, sync specs,
-push, merge, deploy, change model/provider settings, or install prerequisites.
+Usage: `/openspec-verify-loop [change] [--store <id>] [--max-rounds <n>]`.
+Launch at once. Run only the commands in the steps below. Do not inspect the
+change, the repository or `bb` itself, run the verification yourself, or choose
+a change for the user.
 
-If the management tool is absent, report that the native plugin must be installed;
-do not search for runtime bundles or invent shell launch commands. Report contracts
-are described in [references/report-contract.md](references/report-contract.md).
+1. Find the absolute path of `openspec-verify-change/SKILL.md` in your skill
+   list. If it is not there, run `bb skill list --json` and take the
+   `filePath` of a skill named `openspec-verify-change`, preferring one inside
+   this checkout. If none exists, report that the OpenSpec verify workflow must
+   be installed and stop.
+2. Write the arguments as JSON to thread storage. Include `change`, `store` and
+   `maxRounds` (a number) only when the user gave them, unchanged:
+
+   ```sh
+   cat > "$BB_THREAD_STORAGE/verify-loop-args.json" <<'EOF'
+   {"change": "add-export", "store": "team-specs", "maxRounds": 5, "procedurePath": "/abs/path/openspec-verify-change/SKILL.md"}
+   EOF
+   ```
+
+3. Start the workflow, where `<dir>` is the directory containing this
+   `SKILL.md`:
+
+   ```sh
+   bb workflows run --script "$(cat "<dir>/verify-loop.js")" --args "$(cat "$BB_THREAD_STORAGE/verify-loop-args.json")" --json
+   ```
+
+4. The command returns `{runId, name, status}`. Post this line once, on its
+   own, with the returned run ID, then end the turn without waiting:
+
+   ::workflow-preview{run="<runId>"}
+
+Without a change, the first verifier selects the only active change. When
+several are active it ends `blocked` and lists them; ask the user to pick one.
+
+## Completion
+
+The workflow's completion notice carries the result:
+`{status, change, rounds, reason, report}`. Report the status, change, number
+of verifications, reason and run ID, and summarize the remaining issues from
+`report` unless the status is `clean`. Only `clean` means a fresh verification
+found no issues and verified every check. For `unverified`, list the checks the
+report marks Not verified and say that whether to archive is the user's call.
+If the notice omits or truncates the result, read it with
+`bb workflows status <runId>`, or point the user to the workflow preview.
+
+A completion notice never authorizes another run. Do not start, resume or stop
+a workflow in response to it, and do not fix the remaining issues yourself
+unless the user asks.
+
+## Stop
+
+When the user asks to stop the loop, run `bb workflows stop <runId>` and report
+the status it returns.

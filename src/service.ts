@@ -1,43 +1,62 @@
 import type { Plugin } from '@opencode/plugin';
 import { z } from 'zod';
-import { resolveConfig } from './config.js';
+import { configSchema } from './config.js';
+import { loadScript, runScript } from './loop.js';
 import { RunManager } from './manager.js';
-import { connectToHost, resolveOriginModel, type Adapter } from './opencode.js';
+import { connectToHost, resolveOriginModel, type Adapter, type Model } from './opencode.js';
+import { createAgent } from './runner.js';
 import { LoopError, projectRoot } from './util.js';
 
-const runId = z.string().regex(/^run_[a-f0-9]+$/);
 const changeName = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+const storeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+const maxRounds = z.number().int().positive();
 // Function-tool providers require an object schema at the root. Enforce action-specific
 // fields with actionSchema at execution, rather than exposing a root-level union.
 export const toolInputSchema = z.strictObject({
-  action: z.enum(['run', 'status', 'resume', 'stop']),
-  change: changeName.optional().describe('Active change name; only for run. Omit to select the single active change.'),
-  runId: runId.optional().describe('Required for resume/stop; optional for status; omitted for run.'),
+  action: z.enum(['run', 'stop']),
+  change: changeName.optional().describe('Change name; only for run. Omit to let the first verifier select the active change.'),
+  store: storeId.optional().describe('OpenSpec store ID; only for run.'),
+  maxRounds: maxRounds.optional().describe('Verification round limit; only for run. Default 5.'),
 });
 export const actionSchema = z.discriminatedUnion('action', [
-  z.strictObject({action: z.literal('run'), change: changeName.optional()}),
-  z.strictObject({action: z.literal('status'), runId: runId.optional()}),
-  z.strictObject({action: z.literal('resume'), runId}),
-  z.strictObject({action: z.literal('stop'), runId}),
+  z.strictObject({action: z.literal('run'), change: changeName.optional(), store: storeId.optional(), maxRounds: maxRounds.optional()}),
+  z.strictObject({action: z.literal('stop')}),
 ]);
 export type Action = z.infer<typeof actionSchema>;
 
 export class LoopService {
   constructor(private ctx: Plugin.Context, readonly manager: RunManager,
-    private connect: (ctx: Plugin.Context, sessionId: string, server?: string) => Promise<{adapter: Adapter}> = connectToHost) {}
+    private connect: (ctx: Plugin.Context, sessionId: string, server?: string) => Promise<{adapter: Adapter}> = connectToHost,
+    private pollMs?: number) {}
   async execute(sessionId: string, input: unknown, messageId?: string) {
     const action = actionSchema.parse(input);
     const origin = await this.ctx.session.get({sessionID: sessionId});
     if (origin.metadata?.openspecVerifyLoop) throw new LoopError('blocked', 'Loop workers cannot invoke the loop management interface');
     const project = await projectRoot(origin.location.directory);
-    const config = resolveConfig(this.ctx.options, project);
-    if (action.action === 'status') return this.manager.status(project, config, action.runId);
+    if (action.action === 'stop') return this.manager.stop(project);
+    const config = configSchema.parse(this.ctx.options);
     const {adapter} = await this.connect(this.ctx, sessionId, config.server);
-    if (action.action === 'run') {
-      const model = config.verifierModel && config.fixerModel ? undefined : await resolveOriginModel(this.ctx, origin, messageId);
-      return this.manager.start(project, config, adapter, action.change, {sessionId, model});
+    const model = await resolveOriginModel(this.ctx, origin, messageId);
+    if (!model) throw new LoopError('blocked', 'Cannot identify the invoking model; select a model in this session');
+    const catalog = await adapter.catalog(project);
+    if (!isAvailable(model, catalog.models)) {
+      throw new LoopError('blocked', `Unavailable model ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ''}`);
     }
-    if (action.action === 'resume') return this.manager.resume(project, config, adapter, action.runId, sessionId);
-    return this.manager.stop(project, config, adapter, action.runId);
+    const skills = catalog.skills.filter(skill => skill.id === 'openspec-verify-change' || skill.name === 'openspec-verify-change');
+    if (!skills.length) throw new LoopError('blocked', 'The openspec-verify-change skill is missing; enable the OpenSpec verify workflow and run `openspec update`');
+    if (skills.length > 1) throw new LoopError('blocked', `Expected one openspec-verify-change skill, found ${skills.length}: ${skills.map(skill => skill.path).join(', ')}`);
+    const source = await loadScript();
+    const args = {change: action.change, store: action.store, maxRounds: action.maxRounds ?? config.maxRounds, procedurePath: skills[0]!.path};
+    const started = this.manager.start(project, sessionId, (signal, runId) => runScript(source, {
+      agent: createAgent({adapter, project, runId, model, signal, pollMs: this.pollMs}),
+      phase: () => {}, log: () => {}, args, budget: () => ({maxAgentCalls: Number.MAX_SAFE_INTEGER}),
+    }));
+    return {...started, model};
   }
+}
+
+// Hosts report the implicit base configuration as variant "default" without listing it.
+function isAvailable(model: Model, models: {id: string; providerID: string; enabled: boolean; variants: string[]}[]) {
+  const available = models.find(m => m.providerID === model.providerID && m.id === model.id && m.enabled);
+  return !!available && (!model.variant || model.variant === 'default' || available.variants.includes(model.variant));
 }

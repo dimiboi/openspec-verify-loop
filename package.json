@@ -1,10 +1,18 @@
 {
   "name": "openspec-verify-loop",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "Native OpenCode plugin that verifies and fixes an OpenSpec change until clean",
+  "description": "Verify and fix an OpenSpec change until clean, as a bb or OpenCode plugin",
+  "bb": {
+    "name": "OpenSpec verify loop",
+    "description": "Verify an OpenSpec change, fix every finding with fresh workers, and repeat until clean",
+    "branding": {
+      "icon": "Workflow"
+    },
+    "server": "./bb/server.ts"
+  },
   "engines": {
     "node": ">=22.18.0"
   },
@@ -20,7 +28,6 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@fission-ai/openspec": "1.16.0",
     "@types/node": "26.6.6",
     "esbuild": "0.28.2",
     "tsx": "4.23.15",
@@ -31,7 +38,9 @@
   },
   "files": [
     "dist",
+    "bb",
     "skills/openspec-verify-loop",
+    "opencode",
     "LICENSE"
   ]
 }

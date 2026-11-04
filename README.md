@@ -1,18 +1,115 @@
-# OpenSpec verification loop for OpenCode
+# OpenSpec verification loop
 
-A native OpenCode plugin that verifies an OpenSpec change, sends every finding to
-an independent fixer, and repeats full verification until the change is clean.
-Every verification and fix uses a fresh session, sequentially in the same checkout.
+Verifies an OpenSpec change, sends the full report to a fresh fixer, and repeats
+the verification until it is clean. It installs as a plugin on bb or OpenCode.
+Both hosts run the same loop script,
+[`skills/openspec-verify-loop/verify-loop.js`](skills/openspec-verify-loop/verify-loop.js).
 
-## Install
+Each round:
 
+1. A fresh verifier runs the project's `openspec-verify-change` procedure and
+   ends its report with `VERDICT: CLEAN`, `VERDICT: UNVERIFIED`,
+   `VERDICT: ISSUES` or `VERDICT: BLOCKED <reason>`.
+2. If the report has issues and rounds remain, a fresh fixer receives the full
+   report and fixes every issue.
+
+The loop ends `clean`, `unverified`, `blocked`, or `limit` after the round limit
+(default 5). The last round is always a verification. Clean needs
+`VERDICT: CLEAN` and a report with no nonzero count of critical issues, warnings
+or suggestions and no `Not verified` check. When the report has a Final
+Assessment section, the verify skill's own summary, the loop reads only that
+section, so a report that quotes such marks while describing tests or specs
+can still be clean. Unverified needs
+`VERDICT: UNVERIFIED` and a report with no such count but at least one
+`Not verified` check, for example tests that could not run because the
+project's dependencies are not installed. The loop then stops without a fixer,
+and you decide whether to archive. A change without `design.md` is not
+unverified: the design is optional, so verifiers mark Design Adherence
+Not applicable, and the change can end `clean`. Fixers are told not to create
+optional artifacts to satisfy a check.
+A verifier reply whose last line is not one of the four verdicts, such as an
+empty or truncated reply, ends the run `blocked` without a fixer.
+Workers use the starting session's model, run one at a
+time in the same checkout, and are told not to ask questions and not to commit,
+push, merge, deploy, sync specs or archive. Verifiers are told not to edit,
+create or delete files in the checkout; temporary files outside it, such as
+command output under `/tmp`, are allowed.
+
+The result is `{status, change, rounds, reason, report}`, where `report` is the
+last worker's reply. A dirty tree is allowed; workers preserve unrelated work.
+
+Every host needs the project's `openspec-verify-change` skill. If it is missing,
+enable OpenSpec's verify workflow with `openspec config profile` and refresh the
+project's tool files with `openspec update`.
+
+## bb
+
+### Install
+
+1. Install this repository:
+
+   ```sh
+   bb plugin install git:https://github.com/dimiboi/openspec-verify-loop.git
+   ```
+
+2. Enable the Workflows plugin: `bb plugin enable workflows`.
+
+### Use
+
+Start from a thread in `auto` or `full` mode. Workers are hidden threads that
+inherit the thread's permission mode, so a mode that asks before shell commands,
+such as `accept-edits`, stalls them on the first approval. ACP providers such as
+local Flint offer only `accept-edits` and `full`, so they need `full`. The
+plugin does not check the mode.
+
+```text
+/openspec-verify-loop [change] [--store <id>] [--max-rounds <n>]
+```
+
+The skill starts one workflow and posts its preview. Workers inherit the
+thread's provider, model, reasoning level and permission mode. Without a change,
+the first verifier selects the only active change; with several active changes
+the run ends `blocked` and lists them. When the run ends, the thread reports the
+result from the workflow's completion notice and starts no new run. To stop a
+run, ask the thread to stop it; it runs `bb workflows stop <runId>`. The
+Workflows preview and history keep every round's report.
+
+### ACP providers and local Flint
+
+On ACP providers such as OpenCode, typing `/openspec-verify-loop` as plain text
+does not start the skill: OpenCode does not know bb's plugin skills, so the
+agent only sees the text. Pick the skill from bb's `/` menu, or name it in the
+prompt, for example "Use the openspec-verify-loop skill on change add-export".
+
+The built-in `acp-opencode` provider can record local Flint with no reasoning
+levels, and Workflows then refuses to start its workers. bb's model discovery
+stores another model's reasoning options under Flint when OpenCode answers a
+model switch late (anomalyco/opencode#60316, get-bb/bb#6871), and Workflows
+rejects models with an empty list (get-bb/bb#6792). Both are fixed upstream but
+not in a release yet (bb 0.48.1). Until one ships, start Flint loops from a
+custom ACP profile whose `nativeReasoning` setting fills in `medium`:
+
+```sh
+bb plugin config provider-acp set customAgents '[{"id":"opencode-default-compat","displayName":"OpenCode (default compatibility)","command":"opencode","args":["acp"],"dialect":"opencode","supportsManualCompaction":true,"providerUsage":true,"nativeSkillRoots":{"user":[".claude/skills",".agents/skills"],"project":[".opencode/skills",".claude/skills",".agents/skills"]},"nativeReasoning":{"configId":"effort","supportedLevels":["medium"],"defaultLevel":"medium","levelValues":{"medium":"default"}}}]'
+```
+
+This replaces any existing `customAgents` value, so merge entries you already
+have. The profile appears as provider `acp-opencode-default-compat`; start a
+Flint thread on it in `full` mode, at medium reasoning. Custom profiles cannot
+fork threads. See [known upstream issues](docs/known-issues.md) for the details.
+
+## OpenCode
+
+### Install
+
+Requires **OpenCode 2.2.5**; the plugin refuses to load on any other version.
 Install globally from GitHub:
 
 ```sh
 opencode plugin add github:dimiboi/openspec-verify-loop
 ```
 
-Or add the plugin to a project's `opencode.jsonc`:
+Or add it to a project's `opencode.jsonc`:
 
 ```jsonc
 {
@@ -20,182 +117,62 @@ Or add the plugin to a project's `opencode.jsonc`:
 }
 ```
 
-Use a release tag or complete commit hash to pin a revision. OpenCode installs and
-loads the package and registers its commands, tool, and bundled skill. Consumers
-need no setup command, generated agent files, or manual build.
+Use a release tag or a full commit hash to pin a revision. The package ships a
+prebuilt `dist/index.js`, so installation runs no build.
 
-Requirements: **OpenCode 2.2.5**, **OpenSpec 1.16.0**, Git, an available OpenCode
-model, and the project's actual `openspec-verify-change` skill. Enable OpenSpec's
-verify workflow with `openspec config profile` and refresh project tool files with
-`openspec update` if that skill is missing. The plugin reports missing prerequisites
-without modifying OpenSpec or model configuration.
-
-Changes must belong to an OpenSpec root at the Git checkout root. Stores, nested
-subproject roots, and multi-repository changes are unsupported.
-
-## Use
+### Use
 
 ```text
-/verify-loop
-/verify-loop add-export
-/verify-loop-status
-/verify-loop-status <run-id>
-/verify-loop-resume <run-id>
-/verify-loop-stop <run-id>
+/opsx-verify-loop [change]
+/opsx-verify-loop-stop
 ```
 
-Start without a name when exactly one change is active. With several changes,
-choose one of the returned names. No active change starts no workers. Status
-without a run ID lists this checkout's runs.
+The bundled `openspec-verify-loop` skill calls the `openspec_verify_loop` tool
+with action `run` (optional `change`, `store` and `maxRounds`) or `stop`.
 
-You can also invoke the bundled `openspec-verify-loop` skill in conversation. It
-uses the `openspec_verify_loop` tool with `run`, `status`, `resume`, or `stop` and
-optional `change`/`runId` arguments. Commands and the tool use the same controller.
+`run` returns `started` with the run ID and worker model at once, and the loop
+continues in the background. One run per checkout is allowed. Workers use the
+model and variant of the turn that started the loop: the tool call's turn, or
+the session's current selection for a command. If that model cannot be
+identified or is unavailable, the run does not start; no other model is
+substituted. The project must advertise exactly one `openspec-verify-change`
+skill.
 
-Start and resume return a durable run ID and report location while the OpenCode
-server owns the ongoing work. Native command results and final outcomes are
-reported through session notices. Reporting turns have their tools removed and
-only summarize the saved result. Ordinary user turns keep their tools. Closing a
-client does not cancel server-owned work. Plugin unload/reload interrupts owned
-work; explicitly resume after reload if needed.
+Each worker is a new session in the checkout on the plugin's own OpenCode
+server. Verifiers cannot use the edit tool; no worker can use subagents or the
+loop tool. Shell commands follow the project's permissions. A worker prompt is
+submitted at most once: an uncertain submission is reconciled by its input ID,
+and the run fails if the prompt is not found. If a worker waits for a permission
+or a question, the run ends `blocked`, names the worker session and interrupts
+it.
 
-A dirty tree is allowed. Workers preserve unrelated work. The plugin does not
-commit, archive, sync specs, push, merge, or deploy.
+When the run ends, the starting session receives one notice with the result or
+failure; the turn that reports it has no tools. `/opsx-verify-loop-stop` interrupts
+the active worker and ends the run as `stopped`. Unloading the plugin interrupts
+the active worker too. A run does not survive an OpenCode restart; start it
+again.
 
-## Completion and permissions
-
-Clean requires a fresh complete verifier with zero critical findings, warnings,
-suggestions, or checks the procedure left unverified. Every prior finding needs an
-explicit resolution with evidence. Independent OpenSpec validation and configured
-checks must pass against the reviewed workspace; a failing one becomes a critical
-finding for the next fixer. A fixer's completion claim cannot make the run clean.
-
-The verifier returns the verification procedure's own report and copies its issues
-and unverified checks unchanged; the plugin derives the outcome, so the verifier
-never maps review dimensions onto loop statuses. A fixer may dispute an incorrect
-finding with evidence; the next fresh verifier decides it, and two fix cycles
-without workspace changes stop the run as blocked.
-
-Verifier prompts include the pinned verification procedure once. Fixers receive
-the complete issue list and relevant task/check context; subsequent verifiers
-receive the prior issues and compact fix dispositions. Full reports remain on
-disk. Independent check output is represented by exit codes, bounded excerpts,
-and saved evidence paths, so lengthy logs and report Markdown do not fill each
-worker's prompt. No finding or required check is dropped to shorten a handoff.
-
-The built-in `build` agent runs both roles with per-session policies. Verifiers
-cannot use edit tools; shell commands require approval except for narrow inspection
-rules. Shell permissions are not a filesystem sandbox. Unexpected source changes
-during verification or a worker commit invalidate the result. Fixers retain the
-project's editing/shell rules. Both roles are prevented from delegating or invoking
-the loop management interface.
-
-A worker permission request or question saves `awaiting_input` and retains the
-checkout reservation. Open its reported worker session, answer the request, then
-run `/verify-loop-resume <run-id>`. The plugin never approves requests for you.
-A stop can return `stopping` while reconciliation finishes; inspect status before
-starting another run.
-
-No default round limit applies. Explicit time/round limits, blockers, failed
-execution, malformed reports, and two consecutive fixes without workspace progress
-stop unsuccessfully. Time limits include downtime.
-
-## Configure
-
-Set options in the native plugin entry:
+### Configure
 
 ```jsonc
 {
   "plugins": [
     {
       "package": "github:dimiboi/openspec-verify-loop",
-      "options": {
-        "verifierModel": "provider/model",
-        "fixerModel": "provider/model#variant",
-        "checks": [
-          { "id": "tests", "command": ["npm", "test"], "timeoutMs": 300000 },
-          { "id": "types", "command": ["npm", "run", "typecheck"] }
-        ]
-      }
+      "options": {"maxRounds": 8}
     }
   ]
 }
 ```
 
-All options are optional. Workers inherit the initiating turn's model and variant
-unless a role model option explicitly overrides them. Native commands use the
-initiating session's selected model. The plugin blocks if it cannot identify an
-inherited model; it never substitutes the build profile or server default.
-Selections and variants are pinned for the run; changing the chat's selected
-model does not change existing workers or resumed runs. Status, start results,
-and final reports include both worker models. Unavailable models fail without substitution.
-
-Configure `checks` for tests, lint, and builds: the plugin runs them itself and
-keeps their real exit codes, while verifier shell commands need approval.
-Check commands are argument arrays executed without a shell before each verifier.
-`cwd` defaults to the consuming checkout and must remain inside it; `timeoutMs`
-defaults to 120000. Exit codes and output are saved. Ignore generated outputs:
-checks that modify source or unignored files stop verification. Strict OpenSpec
-validation and task/apply evidence are collected independently on every round.
-
-Additional options:
-
 | Option | Meaning |
 | --- | --- |
-| `skill` | Path to an advertised verification `SKILL.md` when discovery is ambiguous |
-| `stateDir` | Report/state directory outside the checkout and installed plugin |
-| `maxRounds` | Positive verification-round limit |
-| `maxMinutes` | Positive wall-time limit, including downtime |
-| `server` | Hosting OpenCode HTTP endpoint for a non-registered service |
+| `maxRounds` | Default verification round limit (5 if unset) |
+| `server` | HTTP endpoint of the hosting OpenCode server, if it is not registered for discovery |
 
-Relative paths resolve against the invoking session's Git checkout. The plugin
-normally discovers the existing local OpenCode service. It verifies that the
-recovery endpoint belongs to the hosting process and has the same initiating
-session; it never starts, replaces, or stops an OpenCode service. For an explicit
-authenticated endpoint, provide `OPENCODE_TOKEN` in the server environment;
-credentials, query strings, and fragments are rejected in endpoint URLs.
-
-## Reports and recovery
-
-State uses the platform user state directory under `openspec-verify-loop`, honoring
-`XDG_STATE_HOME` or the `stateDir` option. Files are keyed by canonical checkout
-and run ID under `runs/<checkout-key>/<run-id>/`:
-
-```text
-state.json
-events.jsonl
-rounds/001/checks.json
-rounds/001/verifier.raw.json
-rounds/001/verifier.json
-rounds/001/verifier.md
-rounds/001/fixer.raw.json
-rounds/001/fixer.json
-rounds/001/fixer.md
-final.json
-final.md
-```
-
-Status, final reports, and completion notices share the same progress summary.
-It distinguishes prepared assignments, submitted inputs, completed worker outputs,
-and accepted reports for each role. Only accepted verifier reports count as
-completed verification rounds. Failure summaries retain outstanding findings,
-the failing role/round/stage, the original error, and report paths. A completed
-worker whose output fails validation is shown separately from an accepted report;
-its raw output remains available for inspection. Counts for older saved runs
-without lifecycle records are conservative and marked incomplete.
-
-A shared checkout reservation prevents overlapping loops even when report locations
-differ. Resume reconciles saved worker/input identities rather than replaying
-possibly delivered prompts. OpenCode 2.2.5 can restart execution for a duplicate
-input ID, so uncertain admission with no visible saved input stays blocked and
-reserved. Unconfirmed worker termination also retains the reservation. Do not
-delete a reservation to bypass a potentially active worker.
-
-Changes to the target, requirements, verification procedure/resources, worker
-policy, or plugin configuration invalidate a run. Restore its original configuration
-to resume, or stop it and start a new run after reviewing changes. A clean run
-cannot be resumed; start another verification. Loading the plugin never automatically
-adopts or resumes saved work. Reports remain outside the package after removal.
+The plugin finds its hosting server, confirms it is the same process and
+session, and never starts, replaces or stops an OpenCode service. For an
+authenticated endpoint, set `OPENCODE_TOKEN` in the server environment.
 
 ## Development
 
@@ -206,15 +183,13 @@ npm ci
 npm run check
 ```
 
-`check` type-checks, builds the ESM plugin, runs deterministic tests with fake host
-registries/workers and isolated local OpenSpec fixtures, and validates the exported
-package and skill resources. It makes no model calls and starts no OpenCode session.
-`dist/index.js` is committed so Git installations require no build hook. Runtime
-dependencies are external imports installed by OpenCode's package manager.
-The development bundler is named `bundle`: npm treats a `build` script as a Git
-preparation trigger even when the generated output is already committed.
+`check` type-checks, builds `dist/index.js`, runs the deterministic tests and
+validates the package. The tests use fake hosts and workers; they call no model
+and start no OpenCode session. `dist/index.js` is committed so Git installs need
+no build. The bundler script is named `bundle` because npm treats a `build`
+script as a Git preparation trigger.
 
-For development, point a consuming project's plugin entry at this repository's
-absolute directory, then rebuild with `npm run bundle`. See
-[verification and manual testing](docs/verification.md) for the checks you can run
-in OpenCode. Real-host and model testing are separate from the automated suite.
+See [verification and manual testing](docs/verification.md) for the manual
+checks on each host.
+[Known upstream issues](docs/known-issues.md) lists the bb, OpenCode and OpenSpec
+bugs that shape the plugin, where each is tracked, and its workaround.

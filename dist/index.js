@@ -2,165 +2,65 @@
 
 // src/plugin.ts
 import { Plugin, Skill } from "@opencode/plugin";
-import { readFile as readFile6 } from "node:fs/promises";
+import { readFile as readFile2 } from "node:fs/promises";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/config.ts
 import { z } from "zod";
-import { resolve } from "node:path";
 var configSchema = z.strictObject({
-  verifierModel: z.string().min(3).optional(),
-  fixerModel: z.string().min(3).optional(),
-  skill: z.string().min(1).optional(),
   server: z.url().optional(),
-  stateDir: z.string().min(1).optional(),
-  maxRounds: z.number().int().positive().optional(),
-  maxMinutes: z.number().positive().optional(),
-  checks: z.array(z.strictObject({
-    id: z.string().min(1),
-    command: z.array(z.string().min(1)).min(1),
-    cwd: z.string().optional(),
-    timeoutMs: z.number().int().positive().default(12e4)
-  })).default([])
-}).refine((c) => new Set(c.checks.map((check) => check.id)).size === c.checks.length, "Duplicate required check IDs");
-function resolveConfig(options, project) {
-  const config = configSchema.parse(options);
-  if (config.stateDir) config.stateDir = resolve(project, config.stateDir);
-  if (config.skill) config.skill = resolve(project, config.skill);
-  return config;
-}
+  maxRounds: z.number().int().positive().optional()
+});
 
 // src/service.ts
 import { z as z2 } from "zod";
+
+// src/loop.ts
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+var scriptPath = fileURLToPath(new URL("../skills/openspec-verify-loop/verify-loop.js", import.meta.url));
+var loadScript = () => readFile(scriptPath, "utf8");
+var META = "export const meta =";
+var AsyncFunction = Object.getPrototypeOf(async () => {
+}).constructor;
+var math = Object.freeze(Object.fromEntries(Object.getOwnPropertyNames(Math).filter((key) => key !== "random").map((key) => [key, Math[key]])));
+function runScript(source, host) {
+  if (!source.startsWith(META)) throw new Error("Workflow source must start with `export const meta =`");
+  const body = `const meta =${source.slice(META.length)}`;
+  const run = new AsyncFunction("agent", "phase", "log", "args", "budget", "Date", "Math", "process", "require", "fetch", body);
+  return run(host.agent, host.phase, host.log, host.args, host.budget, void 0, math, void 0, void 0, void 0);
+}
 
 // src/opencode.ts
 import { OpenCode } from "@opencode/client";
 import { Service } from "@opencode/client/service";
 
 // src/util.ts
-import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
-import { lstat, readFile, readlink, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve as resolve2, sep } from "node:path";
-var VERSION = "0.3.0";
+import { createHash, randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { realpath } from "node:fs/promises";
+import { resolve } from "node:path";
+import { promisify } from "node:util";
 var OPENCODE_VERSION = "2.2.5";
 var LoopError = class extends Error {
-  constructor(outcome, message, details) {
+  constructor(outcome, message) {
     super(message);
     this.outcome = outcome;
-    this.details = details;
   }
   outcome;
-  details;
 };
 function digest(value) {
   return createHash("sha256").update(value).digest("hex");
 }
-function contained(root, path) {
-  const rel = relative(root, path);
-  return rel === "" || !rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel);
-}
-async function exists(path) {
-  try {
-    await lstat(path);
-    return true;
-  } catch (e) {
-    if (e.code === "ENOENT") return false;
-    throw e;
-  }
-}
-async function command(argv, cwd, timeout = 12e4, signal, envOverrides) {
-  if (!argv[0]) throw new Error("Empty command");
-  if (signal?.aborted) throw signal.reason;
-  const env = { ...process.env, ...envOverrides };
-  delete env.NODE_TEST_CONTEXT;
-  return new Promise((res, rej) => {
-    const group = process.platform !== "win32";
-    const child = spawn(argv[0], argv.slice(1), { cwd, env, detached: group, stdio: ["ignore", "pipe", "pipe"] });
-    const out = [], err = [];
-    let bytes = 0, stopped, force;
-    const kill = (name) => {
-      try {
-        if (group && child.pid) process.kill(-child.pid, name);
-        else if (child.pid) {
-          spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" }).on("error", () => child.kill(name));
-        }
-      } catch (e) {
-        if (e.code !== "ESRCH") child.kill(name);
-      }
-    };
-    const cancel = (reason) => {
-      if (stopped) return;
-      stopped = reason;
-      kill("SIGTERM");
-      force = setTimeout(() => kill("SIGKILL"), 500);
-      force.unref();
-    };
-    const abort = () => cancel(new Error("Command interrupted", { cause: signal?.reason }));
-    const timer = setTimeout(() => cancel(new Error(`Command timed out after ${timeout} ms: ${argv[0]}`)), timeout);
-    const collect = (dest) => (chunk) => {
-      bytes += chunk.length;
-      if (bytes > 32 * 1024 * 1024) cancel(new Error(`Command output exceeded 32 MiB: ${argv[0]}`));
-      else dest.push(chunk);
-    };
-    child.stdout.on("data", collect(out));
-    child.stderr.on("data", collect(err));
-    signal?.addEventListener("abort", abort, { once: true });
-    if (signal?.aborted) abort();
-    const cleanup = () => {
-      clearTimeout(timer);
-      if (force) clearTimeout(force);
-      signal?.removeEventListener("abort", abort);
-    };
-    child.on("error", (e) => {
-      cleanup();
-      rej(new Error(`Cannot execute ${argv[0]}: ${e.message}`, { cause: e }));
-    });
-    child.on("close", (code, exitSignal) => {
-      if (stopped) kill("SIGKILL");
-      cleanup();
-      if (stopped) rej(stopped);
-      else if (code === null) rej(new Error(`Command terminated by ${exitSignal}: ${argv[0]}`));
-      else res({ command: argv, workingDirectory: cwd, exitCode: code, stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8") });
-    });
-  });
-}
-async function jsonCommand(argv, cwd) {
-  const r = await command(argv, cwd);
-  if (r.exitCode !== 0) throw new LoopError("blocked", `${argv[0]} ${argv[1]} failed: ${r.stderr || r.stdout}`);
-  try {
-    return JSON.parse(r.stdout);
-  } catch {
-    throw new Error(`Invalid JSON from ${argv[0]} ${argv[1]}`);
-  }
+function newId(prefix) {
+  return `${prefix}_${Date.now().toString(16)}${randomUUID().replaceAll("-", "")}`;
 }
 async function projectRoot(path) {
-  const cwd = await realpath(resolve2(path));
-  const r = await command(["git", "rev-parse", "--show-toplevel"], cwd);
-  if (r.exitCode !== 0) throw new LoopError("blocked", "The selected project must be a Git checkout");
-  return realpath(r.stdout.trim());
-}
-async function snapshot(project) {
-  const names = await command(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], project);
-  if (names.exitCode) throw new Error("Cannot inventory checkout files");
-  const files = {};
-  for (const name of [...new Set(names.stdout.split("\0").filter(Boolean))].sort()) {
-    const path = resolve2(project, name);
-    if (!contained(project, path)) throw new Error("Git returned a path outside the checkout");
-    try {
-      const st = await lstat(path);
-      files[name] = st.isSymbolicLink() ? digest(`symlink:${await readlink(path)}`) : st.isDirectory() ? "directory" : digest(Buffer.concat([Buffer.from(`${st.mode}:`), await readFile(path)]));
-    } catch (e) {
-      if (e.code !== "ENOENT") throw e;
-      files[name] = "deleted";
-    }
-  }
-  const head = await command(["git", "rev-parse", "--verify", "HEAD"], project);
-  const headId = head.exitCode ? "unborn" : head.stdout.trim();
-  return { hash: digest(JSON.stringify({ head: headId, files })), files, head: headId };
-}
-function changedFiles(before, after) {
-  return [.../* @__PURE__ */ new Set([...Object.keys(before.files), ...Object.keys(after.files)])].filter((p) => before.files[p] !== after.files[p]);
+  const cwd = await realpath(resolve(path));
+  const { stdout } = await promisify(execFile)("git", ["rev-parse", "--show-toplevel"], { cwd, timeout: 12e4 }).catch((e) => {
+    throw typeof e.code === "number" ? new LoopError("blocked", "The selected project must be a Git checkout") : e;
+  });
+  return realpath(stdout.trim());
 }
 function errorMessage(e) {
   return e instanceof Error ? e.message : String(e);
@@ -185,16 +85,6 @@ var delay = (ms, signal) => new Promise((res, rej) => {
 var request = () => ({ signal: AbortSignal.timeout(2e4) });
 function isMissing(e) {
   return e?._tag === "SessionNotFoundError";
-}
-function parseModel(input) {
-  const slash = input.indexOf("/");
-  if (slash < 1 || slash === input.length - 1) throw new Error("Model must be provider/model[#variant]");
-  const rest = input.slice(slash + 1);
-  const hash = rest.lastIndexOf("#");
-  const id = hash < 0 ? rest : rest.slice(0, hash);
-  const variant = hash < 0 ? void 0 : rest.slice(hash + 1);
-  if (!id || variant === "") throw new Error("Invalid model reference");
-  return { providerID: input.slice(0, slash), id, ...variant ? { variant } : {} };
 }
 async function resolveOriginModel(ctx, origin, messageId) {
   if (!messageId && origin.model) return { ...origin.model };
@@ -395,76 +285,138 @@ var OpenCodeAdapter = class {
   }
 };
 
+// src/workers.ts
+var MANAGEMENT_TOOL = "openspec_verify_loop";
+function workerPermissions(role) {
+  return [
+    ...role === "verifier" ? [{ action: "edit", resource: "*", effect: "deny" }] : [],
+    { action: "subagent", resource: "*", effect: "deny" },
+    { action: MANAGEMENT_TOOL, resource: "*", effect: "deny" }
+  ];
+}
+
+// src/runner.ts
+function createAgent(o) {
+  let round = 0;
+  return async (prompt, opts = {}) => {
+    o.signal.throwIfAborted();
+    const role = opts.phase === "Verify" ? "verifier" : "fixer";
+    if (role === "verifier") round++;
+    const a = {
+      sessionId: newId("ses"),
+      inputId: newId("msg"),
+      project: o.project,
+      runId: o.runId,
+      round,
+      role,
+      agent: "build",
+      model: o.model,
+      permissions: workerPermissions(role),
+      prompt
+    };
+    await o.adapter.ensureSession(a);
+    try {
+      try {
+        await o.adapter.ensurePrompt(a, true);
+      } catch {
+        await o.adapter.ensurePrompt(a, false);
+      }
+      while (true) {
+        o.signal.throwIfAborted();
+        const observation = await o.adapter.observe(a);
+        if (observation.status === "completed") return observation.text;
+        if (observation.status === "awaiting_input") {
+          await o.adapter.interrupt(a).catch(() => false);
+          throw new LoopError("blocked", `The ${role} session ${a.sessionId} is waiting for input: ${JSON.stringify(observation.requests)}`);
+        }
+        if (observation.status !== "running") throw new Error(`The ${role} session ${a.sessionId} ${observation.status}: ${observation.reason}`);
+        await delay(o.pollMs ?? 2e3, o.signal);
+      }
+    } catch (error) {
+      if (!o.signal.aborted) throw error;
+      await o.adapter.interrupt(a).catch(() => false);
+      throw o.signal.reason;
+    }
+  };
+}
+
 // src/service.ts
-var runId = z2.string().regex(/^run_[a-f0-9]+$/);
 var changeName = z2.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+var storeId = z2.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+var maxRounds = z2.number().int().positive();
 var toolInputSchema = z2.strictObject({
-  action: z2.enum(["run", "status", "resume", "stop"]),
-  change: changeName.optional().describe("Active change name; only for run. Omit to select the single active change."),
-  runId: runId.optional().describe("Required for resume/stop; optional for status; omitted for run.")
+  action: z2.enum(["run", "stop"]),
+  change: changeName.optional().describe("Change name; only for run. Omit to let the first verifier select the active change."),
+  store: storeId.optional().describe("OpenSpec store ID; only for run."),
+  maxRounds: maxRounds.optional().describe("Verification round limit; only for run. Default 5.")
 });
 var actionSchema = z2.discriminatedUnion("action", [
-  z2.strictObject({ action: z2.literal("run"), change: changeName.optional() }),
-  z2.strictObject({ action: z2.literal("status"), runId: runId.optional() }),
-  z2.strictObject({ action: z2.literal("resume"), runId }),
-  z2.strictObject({ action: z2.literal("stop"), runId })
+  z2.strictObject({ action: z2.literal("run"), change: changeName.optional(), store: storeId.optional(), maxRounds: maxRounds.optional() }),
+  z2.strictObject({ action: z2.literal("stop") })
 ]);
 var LoopService = class {
-  constructor(ctx, manager, connect = connectToHost) {
+  constructor(ctx, manager, connect = connectToHost, pollMs) {
     this.ctx = ctx;
     this.manager = manager;
     this.connect = connect;
+    this.pollMs = pollMs;
   }
   ctx;
   manager;
   connect;
+  pollMs;
   async execute(sessionId, input, messageId) {
     const action = actionSchema.parse(input);
     const origin = await this.ctx.session.get({ sessionID: sessionId });
     if (origin.metadata?.openspecVerifyLoop) throw new LoopError("blocked", "Loop workers cannot invoke the loop management interface");
     const project = await projectRoot(origin.location.directory);
-    const config = resolveConfig(this.ctx.options, project);
-    if (action.action === "status") return this.manager.status(project, config, action.runId);
+    if (action.action === "stop") return this.manager.stop(project);
+    const config = configSchema.parse(this.ctx.options);
     const { adapter } = await this.connect(this.ctx, sessionId, config.server);
-    if (action.action === "run") {
-      const model = config.verifierModel && config.fixerModel ? void 0 : await resolveOriginModel(this.ctx, origin, messageId);
-      return this.manager.start(project, config, adapter, action.change, { sessionId, model });
+    const model = await resolveOriginModel(this.ctx, origin, messageId);
+    if (!model) throw new LoopError("blocked", "Cannot identify the invoking model; select a model in this session");
+    const catalog = await adapter.catalog(project);
+    if (!isAvailable(model, catalog.models)) {
+      throw new LoopError("blocked", `Unavailable model ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`);
     }
-    if (action.action === "resume") return this.manager.resume(project, config, adapter, action.runId, sessionId);
-    return this.manager.stop(project, config, adapter, action.runId);
+    const skills = catalog.skills.filter((skill) => skill.id === "openspec-verify-change" || skill.name === "openspec-verify-change");
+    if (!skills.length) throw new LoopError("blocked", "The openspec-verify-change skill is missing; enable the OpenSpec verify workflow and run `openspec update`");
+    if (skills.length > 1) throw new LoopError("blocked", `Expected one openspec-verify-change skill, found ${skills.length}: ${skills.map((skill) => skill.path).join(", ")}`);
+    const source = await loadScript();
+    const args = { change: action.change, store: action.store, maxRounds: action.maxRounds ?? config.maxRounds, procedurePath: skills[0].path };
+    const started = this.manager.start(project, sessionId, (signal, runId) => runScript(source, {
+      agent: createAgent({ adapter, project, runId, model, signal, pollMs: this.pollMs }),
+      phase: () => {
+      },
+      log: () => {
+      },
+      args,
+      budget: () => ({ maxAgentCalls: Number.MAX_SAFE_INTEGER })
+    }));
+    return { ...started, model };
   }
 };
+function isAvailable(model, models) {
+  const available = models.find((m) => m.providerID === model.providerID && m.id === model.id && m.enabled);
+  return !!available && (!model.variant || model.variant === "default" || available.variants.includes(model.variant));
+}
 
 // src/commands.ts
-var commandActions = {
-  "verify-loop": "run",
-  "verify-loop-status": "status",
-  "verify-loop-resume": "resume",
-  "verify-loop-stop": "stop"
-};
-function parseCommand(name, text2) {
-  const args = text2.trim() ? text2.trim().split(/\s+/) : [];
-  if (args.length > 1) throw new Error(`/${name} accepts ${commandActions[name] === "run" ? "one change name" : "one run ID"}`);
+var commandActions = { "opsx-verify-loop": "run", "opsx-verify-loop-stop": "stop" };
+function parseCommand(name, text) {
+  const args = text.trim() ? text.trim().split(/\s+/) : [];
   const action = commandActions[name];
-  return actionSchema.parse({ action, ...args[0] ? { [action === "run" ? "change" : "runId"]: args[0] } : {} });
+  if (args.length > (action === "run" ? 1 : 0)) throw new Error(`/${name} accepts ${action === "run" ? "one change name" : "no arguments"}`);
+  return actionSchema.parse({ action, ...args[0] ? { change: args[0] } : {} });
 }
 function failureResult(error) {
-  return {
-    outcome: error instanceof LoopError ? error.outcome : "failed",
-    reason: errorMessage(error),
-    ...error instanceof LoopError && error.details !== void 0 ? { details: error.details } : {}
-  };
+  return { outcome: error instanceof LoopError ? error.outcome : "failed", reason: errorMessage(error) };
 }
 async function registerCommands(ctx, service, notice) {
   return ctx.command.transform((editor) => {
     for (const name of Object.keys(commandActions)) editor.add({
       name,
-      description: {
-        run: "Verify and fix an OpenSpec change until clean",
-        status: "Inspect verification runs",
-        resume: "Explicitly resume a saved verification run",
-        stop: "Stop a verification run"
-      }[commandActions[name]],
+      description: commandActions[name] === "run" ? "Verify and fix an OpenSpec change until clean" : "Stop the running verification loop",
       async execute({ sessionID, prompt }) {
         let result;
         try {
@@ -472,6 +424,8 @@ async function registerCommands(ctx, service, notice) {
         } catch (error) {
           result = failureResult(error);
         }
+        const stopped = result;
+        if (stopped.outcome === "stopped" && stopped.originSessionId === sessionID) return;
         await notice(sessionID, result);
       }
     });
@@ -479,1302 +433,59 @@ async function registerCommands(ctx, service, notice) {
 }
 
 // src/manager.ts
-import { randomUUID as randomUUID2 } from "node:crypto";
-import { readdir as readdir2, realpath as realpath4 } from "node:fs/promises";
-import { join as join6 } from "node:path";
-
-// src/controller.ts
-import { dirname as dirname4, join as join5, resolve as resolve5 } from "node:path";
-import { fileURLToPath } from "node:url";
-import { mkdir as mkdir2, rm as rm2 } from "node:fs/promises";
-
-// src/openspec.ts
-import { z as z3 } from "zod";
-import { readdir, readFile as readFile2, realpath as realpath2, lstat as lstat2 } from "node:fs/promises";
-import { dirname, join, resolve as resolve3, relative as relative2, sep as sep2 } from "node:path";
-
-// src/workers.ts
-var MANAGEMENT_TOOL = "openspec_verify_loop";
-var promptContextVersion = 3;
-var workerInstructions = {
-  verifier: "Perform one inspection assignment. Execute the pinned verification procedure in full. Leave source, task tracking, requirements, and archival state unchanged. Shell access is permission-controlled, not a filesystem sandbox; do not bypass edit restrictions through the shell.",
-  fixer: "Address every supplied finding and missing check evidence with small, checked edits. Preserve unrelated work. Do not weaken tests, requirements, or approved scope to manufacture a clean result. Dispute an incorrect finding with evidence; unsettled requirements decisions and external prerequisites are blockers."
-};
-var commonInstructions = "The controller owns sequencing. Do not launch workers, invoke openspec_verify_loop, commit, push, merge, deploy, sync specs, or archive. Do not inspect other sessions, loop state, or orchestration tooling; use only the supplied report paths. Follow repository instructions. Navigation: first get the implementation's changed-file map (git log/show --stat for the change's commits, git diff --stat for uncommitted work) to target reads, not to limit review; review committed implementation even when git status is clean. Use exposed symbol tools (e.g. Serena) for code symbols and rg -n scoped to source/test directories for CSS, config, and test text; quote shell globs. Read bounded ranges around hits, never re-read a range already in context, and narrow any search that hits a result cap. Keep lengthy command output in logs outside the checkout; preserve the actual exit status when limiting output and do not hide stderr. Complete only this assignment and return exactly the requested report.";
-function workerPermissions(role, base = []) {
-  return [
-    ...role === "verifier" ? [
-      { action: "shell", resource: "*", effect: "ask" },
-      ...[
-        "git status",
-        "git diff",
-        "git log",
-        "git show",
-        "git ls-files",
-        "openspec list",
-        "openspec status",
-        "openspec instructions",
-        "openspec validate"
-      ].map((command2) => ({ action: "shell", resource: `${command2}*`, effect: "allow" })),
-      // Role inspection exceptions must never grant access forbidden by the project.
-      ...base.filter((rule) => ["shell", "*"].includes(rule.action) && rule.effect !== "allow"),
-      { action: "edit", resource: "*", effect: "deny" }
-    ] : [],
-    { action: "subagent", resource: "*", effect: "deny" },
-    { action: MANAGEMENT_TOOL, resource: "*", effect: "deny" }
-  ];
-}
-function workerPolicyDigest(build) {
-  return digest(JSON.stringify({
-    version: VERSION,
-    promptContextVersion,
-    build,
-    workerInstructions,
-    commonInstructions,
-    verifier: workerPermissions("verifier", build.permissions),
-    fixer: workerPermissions("fixer", build.permissions)
-  }));
-}
-
-// src/openspec.ts
-var listSchema = z3.object({
-  changes: z3.array(z3.object({ name: z3.string().min(1), nested: z3.array(z3.string()).optional() })),
-  root: z3.object({ path: z3.string(), source: z3.string(), store_id: z3.string().optional() })
-});
-var statusSchema = z3.object({ changeName: z3.string(), changeRoot: z3.string(), schemaName: z3.string() });
-var applySchema = z3.object({
-  state: z3.enum(["ready", "blocked", "all_done"]),
-  progress: z3.object({ remaining: z3.number().int().nonnegative() }).passthrough(),
-  contextFiles: z3.record(z3.string(), z3.array(z3.string())),
-  tasks: z3.array(z3.object({ sourcePath: z3.string().optional() }).passthrough()).optional()
-}).passthrough();
-async function selectTarget(project, change) {
-  const list = listSchema.parse(await jsonCommand(["openspec", "list", "--json"], project));
-  const root = await realpath2(list.root.path);
-  if (list.root.store_id || root !== project || !["nearest", "implicit"].includes(list.root.source)) {
-    throw new LoopError("blocked", "Only repo-local OpenSpec roots are supported; store and multi-repository targets are unsupported");
-  }
-  const active = list.changes.filter((c) => !c.nested?.length);
-  if (change === void 0) {
-    if (active.length === 0) throw new LoopError("no_active_change", "There is no active OpenSpec change");
-    if (active.length !== 1) throw new LoopError("selection_required", "Choose an active OpenSpec change", active.map((c) => c.name));
-    change = active[0].name;
-  }
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(change) || !active.some((c) => c.name === change)) {
-    throw new LoopError("blocked", `Change ${JSON.stringify(change)} is not a valid active change`);
-  }
-  const status = statusSchema.parse(await jsonCommand(["openspec", "status", "--change", change, "--json"], project));
-  const targetPath = await realpath2(status.changeRoot);
-  if (status.changeName !== change || targetPath !== await realpath2(join(root, "openspec", "changes", change)) || !contained(root, targetPath)) {
-    throw new LoopError("blocked", "OpenSpec resolved a target outside the selected repo-local change");
-  }
-  return { project, changeName: change, targetPath, root, schema: status.schemaName };
-}
-async function directoryDigest(directory, filter = () => true) {
-  const values = [];
-  const walk = async (dir) => {
-    for (const entry of (await readdir(dir, { withFileTypes: true })).sort((a, b) => a.name.localeCompare(b.name))) {
-      if ([".git", "node_modules"].includes(entry.name)) continue;
-      const path = join(dir, entry.name);
-      const name = relative2(directory, path).split(sep2).join("/");
-      if (!filter(name)) continue;
-      if (entry.isDirectory()) await walk(path);
-      else if (entry.isSymbolicLink()) throw new LoopError("blocked", `Resource contains an unsupported symlink: ${path}`);
-      else values.push([name, digest(await readFile2(path))]);
-    }
-  };
-  await walk(directory);
-  return digest(JSON.stringify(values));
-}
-async function scopeDigest(target, trackingPaths) {
-  return directoryDigest(target.targetPath, (name) => !trackingPaths.includes(resolve3(target.targetPath, name)));
-}
-async function projectConfigDigest(project) {
-  const hashes = [];
-  for (const path of [
-    "AGENTS.md",
-    ".opencode/AGENTS.md",
-    "opencode.json",
-    "opencode.jsonc",
-    ".opencode/opencode.json",
-    ".opencode/opencode.jsonc",
-    "openspec/config.yaml",
-    "openspec/config.yml"
-  ]) {
-    if (await exists(join(project, path))) hashes.push([path, digest(await readFile2(join(project, path)))]);
-  }
-  if (await exists(join(project, "openspec/schemas"))) hashes.push(["schemas", await directoryDigest(join(project, "openspec/schemas"))]);
-  return digest(JSON.stringify(hashes));
-}
-function resolveWorkers(catalog, config, options = {}) {
-  const build = catalog.agents.find((agent) => agent.id === "build");
-  if (!build || build.mode === "subagent") throw new LoopError("blocked", "An API-capable build agent is required");
-  const agents = { verifier: "build", fixer: "build" };
-  const models = {};
-  for (const role of ["verifier", "fixer"]) {
-    const override = role === "verifier" ? config.verifierModel : config.fixerModel;
-    const model = options.models?.[role] ?? (override ? parseModel(override) : options.originModel);
-    if (!model) throw new LoopError("blocked", `Cannot inherit the initiating session's ${role} model; select a model in that session or set the plugin's ${role}Model option`);
-    const available = catalog.models.find((m) => m.providerID === model.providerID && m.id === model.id && m.enabled);
-    if (!available || model.variant && model.variant !== "default" && !available.variants.includes(model.variant)) {
-      throw new LoopError("blocked", `Unavailable ${role} model ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`);
-    }
-    models[role] = model;
-  }
-  return {
-    agents,
-    models,
-    workerPolicyDigest: workerPolicyDigest(build),
-    permissions: { verifier: workerPermissions("verifier", build.permissions), fixer: workerPermissions("fixer", build.permissions) }
-  };
-}
-async function pinTarget(target, config, adapter, options = {}) {
-  const version = await command(["openspec", "--version"], target.project);
-  if (version.exitCode || version.stdout.trim() !== "1.16.0") throw new LoopError("blocked", "OpenSpec 1.16.0 is required for this release");
-  const catalog = await adapter.catalog(target.project);
-  const matches = catalog.skills.filter((s) => s.id === "openspec-verify-change" || s.name === "openspec-verify-change");
-  let procedurePath;
-  if (config.skill) {
-    procedurePath = await realpath2(resolve3(target.project, config.skill));
-    if (!catalog.skills.some((s) => resolve3(s.path) === procedurePath)) {
-      const paths = await Promise.all(catalog.skills.map((s) => realpath2(s.path).catch(() => void 0)));
-      if (!paths.includes(procedurePath)) throw new LoopError("blocked", "Explicit verification skill is not advertised by this OpenCode project");
-    }
-  } else {
-    const local = join(target.project, ".opencode/skills/openspec-verify-change/SKILL.md");
-    if (await exists(local)) procedurePath = await realpath2(local);
-    else {
-      if (matches.length !== 1) throw new LoopError("blocked", "Expected one openspec-verify-change skill; install the expanded OpenSpec workflow or set the skill plugin option");
-      procedurePath = await realpath2(matches[0].path);
-    }
-  }
-  if (!(await lstat2(procedurePath)).isFile() || !(await readFile2(procedurePath, "utf8")).trim()) {
-    throw new LoopError("blocked", "Verification procedure is empty or unreadable");
-  }
-  const apply = applySchema.parse(await jsonCommand(["openspec", "instructions", "apply", "--change", target.changeName, "--json"], target.project));
-  const trackingPaths = [...new Set(await Promise.all((apply.tasks ?? []).flatMap((task) => task.sourcePath ? [realpath2(task.sourcePath)] : [])))].sort();
-  if (trackingPaths.some((path) => !contained(target.targetPath, path))) throw new LoopError("blocked", "Task tracking outside the pinned change is unsupported");
-  return {
-    ...target,
-    openspecVersion: version.stdout.trim(),
-    procedurePath,
-    procedureDigest: await directoryDigest(dirname(procedurePath)),
-    scopeDigest: await scopeDigest(target, trackingPaths),
-    trackingPaths,
-    projectConfigDigest: await projectConfigDigest(target.project),
-    configDigest: digest(JSON.stringify(config)),
-    ...resolveWorkers(catalog, config, options)
-  };
-}
-async function checkPins(pins, config, adapter) {
-  const target = await selectTarget(pins.project, pins.changeName);
-  const current = await pinTarget(target, config, adapter, { models: pins.models });
-  if (digest(JSON.stringify(current)) !== digest(JSON.stringify(pins))) {
-    throw new LoopError("blocked", "Pinned target, requirements, procedure, model, or agent configuration changed; review it and start a new run");
-  }
-}
-async function gatherEvidence(pins, config, signal) {
-  const before = await snapshot(pins.project);
-  const validation = await command(["openspec", "validate", pins.changeName, "--type", "change", "--strict", "--no-interactive", "--json"], pins.project, 12e4, signal);
-  const apply = applySchema.parse(await jsonCommand(["openspec", "instructions", "apply", "--change", pins.changeName, "--json"], pins.project));
-  for (const paths of Object.values(apply.contextFiles)) {
-    for (const path of paths) if (!contained(pins.project, await realpath2(path))) throw new LoopError("blocked", "Multi-repository artifact context is unsupported");
-  }
-  if (apply.state === "blocked") throw new LoopError("blocked", "OpenSpec apply prerequisites are incomplete", apply);
-  const checks = [];
-  for (const check of config.checks) {
-    const cwd = await realpath2(resolve3(pins.project, check.cwd ?? "."));
-    if (!contained(pins.project, cwd)) throw new LoopError("blocked", `Check ${check.id} is outside the checkout`);
-    checks.push(await command(check.command, cwd, check.timeoutMs, signal));
-  }
-  const after = await snapshot(pins.project);
-  if (before.hash !== after.hash) throw new LoopError("blocked", "A configured check modified source or unignored files; ignore its generated outputs or fix the check");
-  return { validation, apply, checks, before, after };
-}
-function evidenceFailures(e, checkIds) {
-  return [
-    ...e.validation.exitCode ? ["OpenSpec strict validation failed"] : [],
-    ...e.apply.progress.remaining ? [`${e.apply.progress.remaining} OpenSpec tasks remain incomplete`] : [],
-    // The check ID keeps same-command checks in different directories distinct.
-    ...e.checks.flatMap((c, i) => c.exitCode ? [`Required check ${checkIds[i]} failed: ${JSON.stringify(c.command)}`] : [])
-  ];
-}
-
-// src/reports.ts
-import { z as z4 } from "zod";
-var text = z4.string().trim().min(1);
-var evidence = z4.array(text);
-var common = {
-  schemaVersion: z4.literal(2),
-  runId: text,
-  round: z4.number().int().positive(),
-  changeName: text,
-  targetPath: text,
-  blockers: z4.array(text),
-  fullReportMarkdown: text
-};
-var findingSchema = z4.strictObject({
-  id: text,
-  severity: z4.enum(["critical", "warning", "suggestion"]),
-  category: text,
-  title: text,
-  explanation: text,
-  locations: z4.array(text),
-  recommendation: text
-});
-var verifierSchema = z4.strictObject({
-  ...common,
-  role: z4.literal("verifier"),
-  verificationComplete: z4.boolean(),
-  findings: z4.array(findingSchema),
-  notVerified: z4.array(z4.strictObject({ check: text, reason: text, repairable: z4.boolean() })),
-  priorFindingResolutions: z4.array(z4.strictObject({
-    findingId: text,
-    status: z4.enum(["resolved", "unresolved", "not_applicable"]),
-    evidence,
-    reason: z4.string()
-  }))
-});
-var fixerSchema = z4.strictObject({
-  ...common,
-  role: z4.literal("fixer"),
-  outcome: z4.enum(["completed", "blocked"]),
-  addressedFindings: z4.array(z4.strictObject({ findingId: text, evidence })),
-  unresolvedFindings: z4.array(z4.strictObject({ findingId: text, reason: text })),
-  // A dispute is a disposition, not a resolution: the next fresh verifier decides it.
-  disputedFindings: z4.array(z4.strictObject({ findingId: text, evidence })).default([]),
-  changedFiles: z4.array(text),
-  checksRun: z4.array(z4.strictObject({
-    command: z4.array(text).min(1),
-    workingDirectory: text,
-    exitCode: z4.number().int(),
-    evidence,
-    summary: text
-  }))
-});
-function unique(ids, label) {
-  if (new Set(ids).size !== ids.length) throw new Error(`Duplicate ${label}`);
-}
-function parseReport(raw, role, expected, prior) {
-  if (Buffer.byteLength(raw) > 8 * 1024 * 1024) throw new Error("Report exceeds 8 MiB");
-  const trimmed = raw.trim();
-  const fenced = /^```(?:json)?\s*\n([\s\S]*)\n```$/.exec(trimmed);
-  const value = JSON.parse(fenced?.[1] ?? trimmed);
-  if (Array.isArray(value?.findings)) {
-    for (const f of value.findings) {
-      if (typeof f?.severity === "string") {
-        const severity = f.severity.toLowerCase();
-        f.severity = ["recommendation", "recommendations"].includes(severity) ? "suggestion" : severity;
-      }
-    }
-  }
-  if (role === "verifier" && value && typeof value === "object") delete value.outcome;
-  const report = role === "verifier" ? { ...verifierSchema.parse(value), outcome: "findings" } : fixerSchema.parse(value);
-  for (const key of ["runId", "round", "changeName", "targetPath"]) {
-    if (report[key] !== expected[key]) throw new Error(`Report ${key} does not match pending assignment`);
-  }
-  if (report.role === "verifier") {
-    const closed = new Set(report.priorFindingResolutions.filter((p) => p.status !== "unresolved").map((p) => p.findingId));
-    for (const finding of report.findings) if (closed.has(finding.id)) finding.id = `${finding.id}-r${report.round}`;
-    validateVerifier(report, prior);
-    report.outcome = verifierOutcome(report);
-  } else validateFixer(report, prior);
-  return report;
-}
-function verifierOutcome(r) {
-  if (r.blockers.length || r.notVerified.some((c) => !c.repairable)) return "blocked";
-  return r.verificationComplete && !r.findings.length && !r.notVerified.length && r.priorFindingResolutions.every((p) => p.status !== "unresolved") ? "clean" : "findings";
-}
-function validateVerifier(r, prior) {
-  unique(r.findings.map((f) => f.id), "finding IDs");
-  unique(r.notVerified.map((c) => c.check), "not-verified checks");
-  unique(r.priorFindingResolutions.map((p) => p.findingId), "prior resolutions");
-  const priorIds = new Set(prior.map((f) => f.id));
-  for (const resolution of r.priorFindingResolutions) {
-    if (!priorIds.has(resolution.findingId)) throw new Error(`Unknown prior finding ${resolution.findingId}`);
-    if (resolution.status === "resolved" && !resolution.evidence.length) throw new Error("Resolution lacks evidence");
-    if (resolution.status !== "resolved" && !resolution.reason.trim()) throw new Error("Resolution lacks a reason");
-  }
-  for (const finding of prior) {
-    if (!r.priorFindingResolutions.some((p) => p.findingId === finding.id)) {
-      throw new Error(`Missing resolution for prior finding ${finding.id}`);
-    }
-  }
-}
-function validateFixer(r, prior) {
-  const ids = [...r.addressedFindings, ...r.unresolvedFindings, ...r.disputedFindings].map((f) => f.findingId);
-  unique(ids, "fix dispositions");
-  for (const id of ids) if (!prior.some((f) => f.id === id)) throw new Error(`Unknown fixer finding ${id}`);
-  for (const f of prior) if (!ids.includes(f.id)) throw new Error(`Fixer omitted finding ${f.id}`);
-  if ([...r.addressedFindings, ...r.disputedFindings].some((f) => !f.evidence.length)) throw new Error("Fix or dispute lacks evidence");
-  if (r.outcome === "completed" && (r.unresolvedFindings.length || r.blockers.length || r.checksRun.some((c) => c.exitCode !== 0))) {
-    throw new Error("Completed fixer still has unresolved work or failed checks");
-  }
-  if (r.outcome === "blocked" && !r.blockers.length && !r.unresolvedFindings.length) throw new Error("Blocked fixer lacks explanation");
-}
-function needsRepair(r, prior, evidenceFailures2 = []) {
-  const result = [...r.findings];
-  const add = (f) => {
-    if (!result.some((x) => x.id === f.id)) result.push(f);
-  };
-  for (const p of r.priorFindingResolutions.filter((p2) => p2.status === "unresolved")) {
-    const f = prior.find((f2) => f2.id === p.findingId);
-    if (f) add(f);
-  }
-  for (const c of r.notVerified.filter((c2) => c2.repairable)) {
-    add({
-      id: `check:${c.check}`,
-      severity: "warning",
-      category: "verification",
-      title: `Not verified: ${c.check}`,
-      explanation: c.reason,
-      locations: [],
-      recommendation: "Repair the check or provide the missing verification evidence."
-    });
-  }
-  for (const failure of evidenceFailures2) add({
-    id: `evidence:${failure.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`,
-    severity: "critical",
-    category: "verification",
-    title: failure,
-    explanation: "The controller's independent check evidence failed; see the saved checks.json.",
-    locations: [],
-    recommendation: "Make the failing check pass (including any documented dependency setup) without weakening it."
-  });
-  if (!r.verificationComplete) add({
-    id: "verification:incomplete",
-    severity: "warning",
-    category: "verification",
-    title: "Verification incomplete",
-    explanation: "The full verification procedure was not completed.",
-    locations: [],
-    recommendation: "Repair the missing prerequisites/evidence for a full verification."
-  });
-  return result;
-}
-function reportJsonSchema(role) {
-  return z4.toJSONSchema(role === "verifier" ? verifierSchema : fixerSchema);
-}
-
-// src/state.ts
-import { z as z5 } from "zod";
-import { randomUUID } from "node:crypto";
-import { homedir } from "node:os";
-import { appendFile, mkdir, readFile as readFile3, rename, rm, writeFile, realpath as realpath3 } from "node:fs/promises";
-import { dirname as dirname2, join as join2, relative as relative3, resolve as resolve4 } from "node:path";
-function defaultStateRoot() {
-  if (process.env.XDG_STATE_HOME) return resolve4(process.env.XDG_STATE_HOME, "openspec-verify-loop");
-  if (process.platform === "darwin") return join2(homedir(), "Library", "Application Support", "openspec-verify-loop");
-  if (process.platform === "win32") return join2(process.env.LOCALAPPDATA ?? homedir(), "openspec-verify-loop");
-  return join2(homedir(), ".local/state/openspec-verify-loop");
-}
-var projectKey = (project) => digest(project).slice(0, 24);
-var projectRunsDirectory = (root, project) => join2(resolve4(root), "runs", projectKey(project));
-function newId(prefix) {
-  return `${prefix}_${Date.now().toString(16)}${randomUUID().replaceAll("-", "")}`;
-}
-async function atomicWrite(path, value, raw = false) {
-  await mkdir(dirname2(path), { recursive: true, mode: 448 });
-  const temp = `${path}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temp, raw ? String(value) : `${JSON.stringify(value, null, 2)}
-`, { mode: 384, flag: "wx" });
-    await rename(temp, path);
-  } finally {
-    await rm(temp, { force: true });
-  }
-}
-function runDirectory(root, project, runId2) {
-  if (!/^run_[a-f0-9]+$/.test(runId2)) throw new Error("Invalid run ID");
-  return join2(projectRunsDirectory(root, project), runId2);
-}
-async function ensureExternalState(root, project, packageDir) {
-  const requested = resolve4(root);
-  let ancestor = requested;
-  while (!await exists(ancestor)) ancestor = dirname2(ancestor);
-  const canonical = resolve4(await realpath3(ancestor), relative3(ancestor, requested));
-  if (contained(await realpath3(project), canonical) || packageDir && contained(await realpath3(packageDir), canonical)) {
-    throw new Error("Run state must be outside the checkout and installed plugin");
-  }
-  await mkdir(canonical, { recursive: true, mode: 448 });
-  return canonical;
-}
-var lockSchema = z5.object({ runId: z5.string(), runDir: z5.string(), pid: z5.number().int().nullable(), runtimeId: z5.string(), token: z5.string() });
-var matchesReservation = (owner, expected) => owner.runId === expected.runId && owner.runDir === expected.runDir && owner.runtimeId === expected.runtimeId && owner.token === expected.token;
-function alive(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (e) {
-    return e.code !== "ESRCH";
-  }
-}
-var RunStore = class {
-  constructor(state, lockRoot = join2(defaultStateRoot(), "locks"), runtimeId = randomUUID()) {
-    this.state = state;
-    this.runtimeId = runtimeId;
-    this.lockDir = join2(lockRoot, projectKey(state.project));
-  }
-  state;
-  runtimeId;
-  lockDir;
-  token = randomUUID();
-  owns = false;
-  get reservationIdentity() {
-    return { runId: this.state.runId, runDir: this.state.runDir, runtimeId: this.runtimeId, token: this.token };
-  }
-  async readOwner() {
-    return lockSchema.parse(JSON.parse(await readFile3(join2(this.lockDir, "owner.json"), "utf8")));
-  }
-  async acquire(resume = false, expected) {
-    await mkdir(dirname2(this.lockDir), { recursive: true, mode: 448 });
-    let existing = Boolean(expected), claimed = false;
-    if (!expected) {
-      try {
-        await mkdir(this.lockDir, { mode: 448 });
-      } catch (e) {
-        if (e.code !== "EEXIST") throw e;
-        existing = true;
-      }
-    }
-    const ownerPath = join2(this.lockDir, "owner.json");
-    let recoveryPath;
-    try {
-      if (existing) {
-        let lock;
-        try {
-          lock = await this.readOwner();
-        } catch (error) {
-          if (expected && error.code === "ENOENT") return false;
-          throw new LoopError("blocked", `Incomplete checkout lock at ${this.lockDir}; inspect it before recovery`);
-        }
-        if (expected && !matchesReservation(lock, expected)) return false;
-        if (!resume || lock.runId !== this.state.runId || lock.runDir !== this.state.runDir) {
-          throw new LoopError("blocked", `Checkout reserved by ${lock.runId}; explicitly resume or stop it`, { runDir: lock.runDir });
-        }
-        if (lock.pid !== null && alive(lock.pid)) throw new LoopError("blocked", `Controller ${lock.pid} is still running`);
-        recoveryPath = join2(this.lockDir, `recovery-${digest(lock.token)}`);
-        try {
-          await writeFile(recoveryPath, this.token, { flag: "wx", mode: 384 });
-          claimed = true;
-        } catch {
-          throw new LoopError("blocked", `Another recovery owns ${this.lockDir}`);
-        }
-        const current = await this.readOwner();
-        if (!matchesReservation(current, lock) || current.pid !== lock.pid) {
-          if (expected) return false;
-          throw new LoopError("blocked", "Checkout reservation changed during recovery");
-        }
-        if (current.pid !== null && alive(current.pid)) throw new LoopError("blocked", `Controller ${current.pid} is still running`);
-      }
-      this.owns = true;
-      await atomicWrite(ownerPath, { runId: this.state.runId, runDir: this.state.runDir, pid: process.pid, runtimeId: this.runtimeId, token: this.token });
-      if (resume) this.state = await loadRun(this.state.runDir, this.state.project);
-      this.state.executor = { pid: process.pid, runtimeId: this.runtimeId };
-      await this.save();
-      return true;
-    } finally {
-      if (claimed && recoveryPath) {
-        try {
-          if (await readFile3(recoveryPath, "utf8") === this.token) await rm(recoveryPath, { force: true });
-        } catch {
-        }
-      }
-    }
-  }
-  async ownerPid() {
-    const path = join2(this.lockDir, "owner.json");
-    try {
-      const owner = lockSchema.parse(JSON.parse(await readFile3(path, "utf8")));
-      return owner.runId === this.state.runId && owner.runDir === this.state.runDir ? owner.pid : null;
-    } catch (e) {
-      if (e.code === "ENOENT") return null;
-      throw e;
-    }
-  }
-  /** A cached lease is insufficient after an uncertain release or handoff. */
-  async hasLiveOwnership() {
-    if (!this.owns) return false;
-    try {
-      const owner = lockSchema.parse(JSON.parse(await readFile3(join2(this.lockDir, "owner.json"), "utf8")));
-      return owner.token === this.token && owner.runtimeId === this.runtimeId && owner.pid === process.pid && owner.runId === this.state.runId && owner.runDir === this.state.runDir;
-    } catch {
-      return false;
-    }
-  }
-  async save() {
-    this.state.updatedAt = Date.now();
-    await atomicWrite(join2(this.state.runDir, "state.json"), this.state);
-  }
-  async event(type, data = {}) {
-    await mkdir(this.state.runDir, { recursive: true, mode: 448 });
-    await appendFile(join2(this.state.runDir, "events.jsonl"), `${JSON.stringify({ time: Date.now(), type, data })}
-`, { mode: 384 });
-  }
-  async release(retainReservation) {
-    if (!this.owns) return;
-    const path = join2(this.lockDir, "owner.json");
-    const owner = lockSchema.parse(JSON.parse(await readFile3(path, "utf8")));
-    if (owner.token !== this.token) throw new Error("Checkout lock ownership changed");
-    delete this.state.executor;
-    await this.save();
-    if (retainReservation) await atomicWrite(path, { ...owner, pid: null });
-    else await rm(this.lockDir, { recursive: true });
-    this.owns = false;
-  }
-  async stopping() {
-    return exists(join2(this.state.runDir, "stop.request"));
-  }
-};
-async function loadRun(runDir, project) {
-  const value = JSON.parse(await readFile3(join2(runDir, "state.json"), "utf8"));
-  if (value.schemaVersion !== 2 || value.project !== project || value.runDir !== runDir || value.pins?.project !== project || !Number.isInteger(value.round) || value.round < 1 || !Array.isArray(value.prior)) {
-    throw new Error("Incompatible or invalid saved run state");
-  }
-  return value;
-}
-
-// src/prompts.ts
-import { readFile as readFile4 } from "node:fs/promises";
-import { dirname as dirname3, join as join3 } from "node:path";
-var outputExcerptLength = 2400;
-function outputExcerpt(output) {
-  const omittedCharacters = Math.max(0, output.length - outputExcerptLength);
-  return { text: omittedCharacters ? `${output.slice(0, outputExcerptLength / 2)}
-[Output omitted; see the saved checks.json.]
-${output.slice(-outputExcerptLength / 2)}` : output, omittedCharacters };
-}
-function commandEvidence(result) {
-  return {
-    command: result.command,
-    workingDirectory: result.workingDirectory,
-    exitCode: result.exitCode,
-    status: result.exitCode === 0 ? "passed" : "failed",
-    stdout: outputExcerpt(result.stdout),
-    stderr: outputExcerpt(result.stderr)
-  };
-}
-function roundDirectory(s, round) {
-  return join3(s.runDir, "rounds", String(round).padStart(3, "0"));
-}
-function reportPaths(s, role, round) {
-  const directory = roundDirectory(s, round);
-  return {
-    role,
-    round,
-    json: join3(directory, `${role}.json`),
-    markdown: join3(directory, `${role}.md`),
-    raw: join3(directory, `${role}.raw.json`),
-    ...role === "verifier" ? { checks: join3(directory, "checks.json") } : {}
-  };
-}
-async function workerPrompt(s, role, evidence2) {
-  const procedure = role === "verifier" ? await readFile4(s.pins.procedurePath, "utf8") : void 0;
-  const verifier = s.verifier;
-  const fixer = s.fixer;
-  return [
-    `Perform exactly one ${role} assignment for the pinned OpenSpec change. The controller owns the loop.`,
-    workerInstructions[role],
-    commonInstructions,
-    `Identity (copy these values exactly into the report): ${JSON.stringify({
-      schemaVersion: 1,
-      runId: s.runId,
-      round: s.round,
-      changeName: s.pins.changeName,
-      targetPath: s.pins.targetPath,
-      role
-    })}`,
-    `Checkout: ${s.project}
-Verification procedure: ${s.pins.procedurePath}
-Resource base directory: ${dirname3(s.pins.procedurePath)}
-Pinned procedure/resource digest: ${s.pins.procedureDigest}`,
-    role === "verifier" ? `The authoritative pinned verification procedure is already loaded below. Execute it in full; do not rediscover or reread its entrypoint. Read referenced relative resources from the resource base directory when needed.
-<openspec-verification-procedure>
-${procedure}
-</openspec-verification-procedure>` : "The change name and path above are pinned; do not rediscover them. Use the procedure path and resources only when a supplied finding needs that context.",
-    role === "verifier" ? "Inspect only. Re-read the artifacts and implementation and perform full verification, including new regressions. Test/lint/build evidence comes from the controller's current checks below; run an additional procedure check only when new changes, failures, or uncertainty require it. Previous-round evidence cannot establish current success. Do not implement, change task state, sync specs, or archive. Put the procedure's normal report, unchanged, in fullReportMarkdown. Then copy each CRITICAL/WARNING/SUGGESTION issue from that report into findings with the severity it has there, and each check the report marks not verified or skipped into notVerified (repairable=false only for external prerequisites the fixer cannot provide). Checks the report marks Not applicable are not gaps; leave them out of notVerified. Do not reclassify issues, change severities, or rate dimensions for the loop; the controller derives the outcome. Report a still-present prior finding as unresolved under its original ID; give every new finding an ID that differs from all prior finding IDs. Re-check disputed findings independently and resolve or keep each one." : "Fix every supplied finding, including warnings, suggestions, unresolved earlier findings, and repairable missing evidence. Work in this order: (1) start from each finding's locations; (2) write a short repair plan naming the governing requirement, the minimal edit, and one concrete check for each open question; (3) settle open questions with evidence instead of more deliberation: a bounded code read, a test, an available documentation tool (e.g. Context7) for library/API behavior, or an available browser tool (e.g. Playwright) for layout/UI behavior; (4) apply a small reversible edit, run its check, and reopen the choice only when a check gives new evidence. A fresh verifier judges the result next round; do not try to pre-empt every possible objection. When the change's own artifacts conflict, follow the reading the proposal/specs support, make the artifact wording consistent, and say so. If a finding is wrong or contradicts an agreed requirement, put it in disputedFindings with concrete evidence instead of forcing a change. Preserve unrelated work. Do not weaken tests or requirements. Update task evidence only if work is implemented. Report requirements decisions no artifact settles, or external prerequisites, as blockers. Do not verify another round or archive.",
-    role === "fixer" && s.taskContext ? `Pinned OpenSpec task context (apply context constraints; operationGuidance is advisory; state/instruction are context, not authorization to archive):
-${JSON.stringify(s.taskContext, null, 2)}` : "",
-    `All prior/unresolved findings requiring disposition (none may be dropped):
-${JSON.stringify(s.prior, null, 2)}`,
-    verifier ? `Latest verification gaps and resolutions (findings are supplied once above; check prior evidence against the current workspace):
-${JSON.stringify({
-      round: verifier.round,
-      verificationComplete: verifier.verificationComplete,
-      notVerified: verifier.notVerified,
-      priorFindingResolutions: verifier.priorFindingResolutions,
-      blockers: verifier.blockers
-    }, null, 2)}` : "",
-    role === "verifier" && fixer ? `Latest fixer dispositions (claims require independent verification):
-${JSON.stringify({
-      round: fixer.round,
-      outcome: fixer.outcome,
-      addressedFindings: fixer.addressedFindings,
-      unresolvedFindings: fixer.unresolvedFindings,
-      disputedFindings: fixer.disputedFindings,
-      changedFiles: fixer.changedFiles,
-      checksRun: fixer.checksRun,
-      blockers: fixer.blockers
-    }, null, 2)}` : "",
-    verifier || fixer ? `Complete JSON, Markdown, and raw reports remain saved at these paths; consult them for additional detail:
-${JSON.stringify([
-      ...verifier ? [reportPaths(s, "verifier", verifier.round)] : [],
-      ...fixer ? [reportPaths(s, "fixer", fixer.round)] : []
-    ], null, 2)}` : "",
-    evidence2 ? `Controller's independent current check evidence (failures/incomplete tasks prevent clean; excerpts retain actual exit status; full output is saved):
-${JSON.stringify({
-      workspace: evidence2.after.hash,
-      checksPath: join3(roundDirectory(s, s.round), "checks.json"),
-      validation: commandEvidence(evidence2.validation),
-      apply: evidence2.apply,
-      checks: evidence2.checks.map((check, index) => ({ id: s.config.checks[index]?.id, ...commandEvidence(check) }))
-    }, null, 2)}` : "",
-    `Return exactly one JSON object conforming to this schema. Keep the full OpenSpec-style Markdown report in fullReportMarkdown. Do not output commentary or omit fields.
-${JSON.stringify(reportJsonSchema(role))}`
-  ].filter(Boolean).join("\n\n");
-}
-
-// src/summary.ts
-import { join as join4 } from "node:path";
-var stages = ["prepared", "submitted", "completed", "accepted"];
-var markdownDestination = (path) => `<${path.replaceAll("%", "%25").replaceAll("<", "%3C").replaceAll(">", "%3E")}>`;
-function progressFor(state, worker) {
-  if (worker.progress) return worker.progress;
-  const report = worker.role === "verifier" ? state.verifier : state.fixer;
-  if (report?.round === worker.round) return "accepted";
-  if (state.pending?.assignment.sessionId === worker.sessionId && state.pending.stage === "submitted") return "submitted";
-  return "prepared";
-}
-function reportLocation(state, report) {
-  if (!report) return void 0;
-  const path = join4(state.runDir, "rounds", String(report.round).padStart(3, "0"), report.role);
-  return { round: report.round, outcome: report.outcome, json: `${path}.json`, markdown: `${path}.md` };
-}
-function completedLocation(state, role) {
-  const worker = state.workers.findLast((worker2) => worker2.role === role && stages.indexOf(progressFor(state, worker2)) >= stages.indexOf("completed"));
-  return worker ? { round: worker.round, raw: join4(state.runDir, "rounds", String(worker.round).padStart(3, "0"), `${role}.raw.json`) } : void 0;
-}
-function runSummary(state) {
-  const progress = Object.fromEntries(["verifier", "fixer"].map((role) => {
-    const workers = state.workers.filter((worker) => worker.role === role);
-    return [role, Object.fromEntries(stages.map((stage, index) => [
-      stage,
-      workers.filter((worker) => stages.indexOf(progressFor(state, worker)) >= index).length
-    ]))];
-  }));
-  const unresolvedSeverityCounts = { critical: 0, warning: 0, suggestion: 0 };
-  for (const finding of state.prior) unresolvedSeverityCounts[finding.severity]++;
-  return {
-    outcome: state.phase,
-    runId: state.runId,
-    runDir: state.runDir,
-    change: state.pins.changeName,
-    round: state.round,
-    rounds: progress.verifier.accepted,
-    reason: state.reason,
-    failure: state.failure,
-    finalizationFailure: state.finalizationFailure,
-    executor: state.executor,
-    requests: state.requests,
-    pending: state.pending ? {
-      sessionId: state.pending.assignment.sessionId,
-      inputId: state.pending.assignment.inputId,
-      role: state.pending.assignment.role,
-      round: state.pending.assignment.round,
-      stage: state.pending.stage
-    } : void 0,
-    models: state.pins.models,
-    workers: state.workers,
-    progress,
-    progressIncomplete: state.workers.some((worker) => !worker.progress),
-    unresolvedFindings: state.prior,
-    unresolvedSeverityCounts,
-    lastVerifier: reportLocation(state, state.verifier),
-    lastFixer: reportLocation(state, state.fixer),
-    lastCompletedVerifier: completedLocation(state, "verifier"),
-    lastCompletedFixer: completedLocation(state, "fixer"),
-    reports: join4(state.runDir, "rounds"),
-    activeMs: state.activeMs
-  };
-}
-function summaryMarkdown(state) {
-  const result = runSummary(state);
-  const lines = [
-    `# OpenSpec verification loop: ${result.outcome}`,
-    "",
-    result.reason ?? "",
-    "",
-    `Change: ${result.change}`,
-    `Run: ${result.runId}`,
-    `Reports: ${result.reports}`,
-    "",
-    ...["verifier", "fixer"].map((role) => {
-      const counts = result.progress[role];
-      return `${role}: ${counts.prepared} prepared, ${counts.submitted} submitted, ${counts.completed} completed, ${counts.accepted} reports accepted`;
-    }),
-    "",
-    `Unresolved findings: ${state.prior.length} (${Object.entries(result.unresolvedSeverityCounts).map(([severity, count]) => `${count} ${severity}`).join(", ")})`
-  ];
-  if (result.failure) lines.push("", `Failure: ${result.failure.role} round ${result.failure.round}, ${result.failure.stage}`, result.failure.error);
-  if (result.finalizationFailure && (result.finalizationFailure.stage !== result.failure?.stage || result.finalizationFailure.error !== result.failure?.error)) {
-    lines.push("", `Finalization failure: ${result.finalizationFailure.stage}`, result.finalizationFailure.error);
-  }
-  if (result.finalizationFailure?.cleanupError) lines.push("", `Ownership cleanup also failed: ${result.finalizationFailure.cleanupError}`);
-  if (result.progressIncomplete) lines.push("", "This older run lacks complete lifecycle records; counts include only saved or otherwise proven progress.");
-  for (const finding of state.prior) lines.push("", `- ${finding.id} (${finding.severity}): ${finding.title}`);
-  for (const [role, report] of [["verifier", result.lastVerifier], ["fixer", result.lastFixer]]) {
-    if (report) lines.push("", `Last accepted ${role}: round ${report.round}, ${report.outcome}`, `[Report](${markdownDestination(report.markdown)})`);
-  }
-  for (const [role, completed] of [["verifier", result.lastCompletedVerifier], ["fixer", result.lastCompletedFixer]]) {
-    if (completed) lines.push("", `Last completed ${role} output: round ${completed.round} [Raw output](${markdownDestination(completed.raw)})`);
-  }
-  if (result.pending) lines.push("", `Pending ${result.pending.role}: ${result.pending.sessionId} (${result.pending.stage}); checkout remains reserved`);
-  lines.push("", "Worker models:", ...["verifier", "fixer"].map((role) => {
-    const model = result.models[role];
-    return `${role}: ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`;
-  }));
-  return `${lines.join("\n")}
-`;
-}
-
-// src/controller.ts
-async function persistEvidence(s, round, evidence2) {
-  if (evidence2) await atomicWrite(join5(s.runDir, "rounds", String(round).padStart(3, "0"), "checks.json"), {
-    workspace: evidence2.after.hash,
-    validation: evidence2.validation,
-    apply: evidence2.apply,
-    checks: evidence2.checks
-  });
-}
-async function persistOutcome(s, includeExecutor = false) {
-  const final = { ...runSummary(s), executor: includeExecutor ? s.executor : void 0 };
-  await atomicWrite(join5(s.runDir, "final.json"), final);
-  await atomicWrite(join5(s.runDir, "final.md"), summaryMarkdown(s), true);
-  return final;
-}
-async function prepareRun(project, config, adapter, change, options = {}) {
-  const target = await selectTarget(project, change);
-  const pins = await pinTarget(target, config, adapter, { originModel: options.originModel });
-  const root = await ensureExternalState(config.stateDir ?? defaultStateRoot(), project, resolve5(dirname4(fileURLToPath(import.meta.url)), ".."));
-  const runId2 = newId("run");
-  const runDir = runDirectory(root, project, runId2);
-  const state = {
-    schemaVersion: 2,
-    pluginVersion: VERSION,
-    originSessionId: options.originSessionId,
-    runId: runId2,
-    runDir,
-    project,
-    config,
-    pins,
-    phase: "preflight",
-    nextRole: "verifier",
-    round: 1,
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    activeMs: 0,
-    prior: [],
-    stalledCycles: 0,
-    workers: []
-  };
-  const store = new RunStore(state, options.lockRoot, options.runtimeId);
-  await store.acquire();
-  try {
-    await store.save();
-  } catch (e) {
-    await store.release(false);
-    throw e;
-  }
-  return store;
-}
-async function executeLoop(store, adapter, options = {}) {
-  const s = store.state;
-  const started = Date.now();
-  const remaining = s.config.maxMinutes ? Math.max(1, s.createdAt + s.config.maxMinutes * 6e4 - started) : void 0;
-  const timer = remaining !== void 0 && remaining < 2147483647 ? AbortSignal.timeout(Math.ceil(remaining)) : void 0;
-  const workSignal = options.signal && timer ? AbortSignal.any([options.signal, timer]) : options.signal ?? timer;
-  const previousActive = s.activeMs;
-  let activity = { role: s.pending?.assignment.role ?? s.nextRole, round: s.pending?.assignment.round ?? s.round, stage: "checking_pins" };
-  const at = (stage, role = s.pending?.assignment.role ?? s.nextRole, round = s.pending?.assignment.round ?? s.round) => {
-    activity = { role, round, stage };
-  };
-  const emit = (event) => options.emit?.(event);
-  const save = async () => {
-    s.activeMs = previousActive + Date.now() - started;
-    await store.save();
-  };
-  const terminate = async (outcome, reason, preservePending = false) => {
-    if (preservePending && s.pending?.stage === "admitting") reason += "; prompt admission is uncertain; checkout remains reserved";
-    if (s.pending && !preservePending) {
-      const confirmed = await adapter.interrupt(s.pending.assignment).catch(() => false);
-      if (confirmed) {
-        if (s.pending.assignment.role === "verifier") s.round++;
-        delete s.pending;
-        s.nextRole = "verifier";
-      } else reason += "; worker termination is unconfirmed; checkout remains reserved";
-    }
-    s.phase = outcome;
-    s.reason = reason;
-    await save();
-  };
-  const guard = async () => {
-    if (options.signal?.aborted || await store.stopping()) throw new LoopError("interrupted", "Stopped by user");
-    if (s.config.maxMinutes && Date.now() - s.createdAt >= s.config.maxMinutes * 6e4) throw new LoopError("limited", "Time limit reached");
-  };
-  try {
-    await rm2(join5(s.runDir, "final.json"), { force: true });
-    await rm2(join5(s.runDir, "final.md"), { force: true });
-    delete s.reason;
-    delete s.failure;
-    delete s.finalizationFailure;
-    delete s.requests;
-    emit({ event: "started", runId: s.runId, runDir: s.runDir, change: s.pins.changeName, models: s.pins.models });
-    await checkPins(s.pins, s.config, adapter);
-    let pinsFresh = true;
-    while (true) {
-      at("before_dispatch");
-      await guard();
-      if (!s.pending) {
-        if (s.config.maxRounds && s.round > s.config.maxRounds) throw new LoopError("limited", "Verification round limit reached");
-        at("checking_pins");
-        if (!pinsFresh) await checkPins(s.pins, s.config, adapter);
-        pinsFresh = false;
-        const role = s.nextRole;
-        at("gathering_evidence");
-        const evidence2 = role === "verifier" ? await gatherEvidence(s.pins, s.config, workSignal) : void 0;
-        if (evidence2) s.taskContext = evidence2.apply;
-        at("snapshotting");
-        const before = evidence2?.after ?? await snapshot(s.project);
-        at("building_prompt");
-        const prompt = await workerPrompt(s, role, evidence2);
-        at("persisting_evidence");
-        await persistEvidence(s, s.round, evidence2);
-        if (Buffer.byteLength(prompt) > 2 * 1024 * 1024) throw new LoopError("blocked", "Complete worker context exceeds 2 MiB; reduce report/context size without dropping findings");
-        const assignment = {
-          sessionId: newId("ses"),
-          inputId: newId("msg"),
-          project: s.project,
-          runId: s.runId,
-          role,
-          round: s.round,
-          agent: s.pins.agents[role],
-          model: s.pins.models[role],
-          permissions: s.pins.permissions[role],
-          prompt
-        };
-        s.pending = { assignment, stage: "prepared", before, ...evidence2 ? { evidenceFailures: evidenceFailures(evidence2, s.config.checks.map((c) => c.id)) } : {} };
-        s.phase = role === "verifier" ? "verifying" : "fixing";
-        s.workers.push({ sessionId: assignment.sessionId, inputId: assignment.inputId, role, round: s.round, progress: "prepared" });
-        await save();
-        await store.event("dispatch_prepared", { sessionId: assignment.sessionId, role, round: s.round });
-      }
-      const pending = s.pending;
-      const a = pending.assignment;
-      const worker = s.workers.find((worker2) => worker2.sessionId === a.sessionId && worker2.inputId === a.inputId);
-      s.phase = a.role === "verifier" ? "verifying" : "fixing";
-      if (pending.stage === "prepared") {
-        at("creating_session");
-        await adapter.ensureSession(a);
-        pending.stage = "created";
-        await save();
-      }
-      if (pending.stage === "created") {
-        pending.stage = "admitting";
-        await save();
-        at("admitting_prompt");
-        await adapter.ensurePrompt(a, true);
-        pending.stage = "submitted";
-        if (worker) worker.progress = "submitted";
-        await save();
-      } else if (pending.stage === "admitting") {
-        at("reconciling_prompt");
-        await adapter.ensurePrompt(a, false);
-        pending.stage = "submitted";
-        if (worker) worker.progress = "submitted";
-        await save();
-      }
-      emit({ event: "worker", role: a.role, round: a.round, sessionId: a.sessionId, inputId: a.inputId });
-      let observation;
-      at("observing_worker");
-      let failures = 0;
-      while (true) {
-        await guard();
-        try {
-          observation = await adapter.observe(a);
-          failures = 0;
-        } catch (e) {
-          if (++failures >= 3) throw new Error(`Cannot reconcile worker after 3 attempts: ${errorMessage(e)}`);
-          emit({ event: "reconnecting", attempt: failures });
-          await delay(options.pollMs ?? 1e3, workSignal);
-          continue;
-        }
-        if (observation.status !== "running") break;
-        await delay(options.pollMs ?? 1e3, workSignal);
-      }
-      if (observation.status === "awaiting_input") {
-        s.requests = observation.requests;
-        await terminate("awaiting_input", "Worker needs permission or user input; answer in its OpenCode session, then explicitly resume this run", true);
-        break;
-      }
-      if (observation.status !== "completed") {
-        throw new LoopError(observation.status === "interrupted" ? "interrupted" : "failed", observation.reason);
-      }
-      const roundDir = join5(s.runDir, "rounds", String(a.round).padStart(3, "0"));
-      at("saving_output");
-      await mkdir2(roundDir, { recursive: true });
-      await atomicWrite(join5(roundDir, `${a.role}.raw.json`), { sessionId: a.sessionId, inputId: a.inputId, messageId: observation.messageId, text: observation.text });
-      if (worker) worker.progress = "completed";
-      await save();
-      at("checking_worker_pins");
-      await checkPins(s.pins, s.config, adapter);
-      pinsFresh = true;
-      at("checking_workspace");
-      const after = await snapshot(s.project);
-      await guard();
-      if (after.head !== pending.before.head) throw new LoopError("blocked", "Checkout HEAD changed during the worker assignment; committing or switching branches is outside this loop");
-      if (a.role === "verifier" && pending.before.hash !== after.hash) {
-        throw new LoopError("blocked", `Checkout changed during verification: ${changedFiles(pending.before, after).join(", ")}; a fresh reviewed run is required`);
-      }
-      at("validating_report");
-      const report = parseReport(observation.text, a.role, { runId: s.runId, round: a.round, changeName: s.pins.changeName, targetPath: s.pins.targetPath }, s.prior);
-      const failedEvidence = a.role === "verifier" ? pending.evidenceFailures ?? ["No independent check evidence"] : [];
-      if (report.role === "verifier" && report.outcome === "clean" && failedEvidence.length) report.outcome = "findings";
-      at("accepting_report");
-      await atomicWrite(join5(roundDir, `${a.role}.json`), { sessionId: a.sessionId, inputId: a.inputId, messageId: observation.messageId, workspace: after.hash, report });
-      await atomicWrite(join5(roundDir, `${a.role}.md`), report.fullReportMarkdown, true);
-      if (worker) worker.progress = "accepted";
-      delete s.pending;
-      if (report.role === "verifier") {
-        s.verifier = report;
-        s.prior = needsRepair(report, s.prior, failedEvidence);
-      } else s.fixer = report;
-      await save();
-      await store.event("report_accepted", { role: a.role, round: a.round, messageId: observation.messageId });
-      if (report.role === "verifier") {
-        if (report.outcome === "blocked" || report.blockers.length) {
-          await terminate("blocked", [
-            ...report.blockers,
-            ...report.notVerified.filter((c) => !c.repairable).map((c) => `Not verified: ${c.check}: ${c.reason}`)
-          ].join("; "));
-          break;
-        }
-        if (report.outcome === "clean") {
-          s.phase = "clean";
-          s.reason = "Fresh full verification has zero findings, nothing left unverified, and passing controller checks";
-          s.prior = [];
-          await save();
-          break;
-        }
-        s.nextRole = "fixer";
-        emit({ event: "findings", round: s.round, count: s.prior.length });
-      } else {
-        if (report.outcome === "blocked") {
-          await terminate("blocked", [...report.blockers, ...report.unresolvedFindings.map((f) => f.reason)].join("; "));
-          break;
-        }
-        const unchanged = pending.before.hash === after.hash;
-        s.stalledCycles = unchanged ? s.stalledCycles + 1 : 0;
-        s.nextRole = "verifier";
-        s.round++;
-        if (s.stalledCycles >= 2) {
-          await terminate("blocked", "Two consecutive fix cycles made no demonstrable progress");
-          break;
-        }
-      }
-      await save();
-    }
-  } catch (e) {
-    const phase = options.signal?.aborted ? "interrupted" : timer?.aborted ? "limited" : e instanceof LoopError && ["blocked", "interrupted", "limited"].includes(e.outcome) ? e.outcome : "failed";
-    s.failure = { ...activity, error: errorMessage(e), ...s.pending ? {
-      sessionId: s.pending.assignment.sessionId,
-      inputId: s.pending.assignment.inputId
-    } : {} };
-    try {
-      await save();
-      await terminate(phase, timer?.aborted && !options.signal?.aborted ? "Time limit reached" : errorMessage(e), s.pending?.stage === "admitting");
-    } catch (error) {
-      if (!await store.hasLiveOwnership()) throw error;
-      s.phase = "failed";
-      s.reason = errorMessage(error);
-      s.finalizationFailure = { ...activity, stage: "saving_failure", error: errorMessage(error) };
-    }
-  } finally {
-    let final;
-    let outcomeError;
-    try {
-      final = await persistOutcome(s);
-    } catch (error) {
-      if (!await store.hasLiveOwnership()) throw error;
-      outcomeError = error;
-      s.finalizationFailure = { ...activity, stage: "persisting_outcome", error: errorMessage(error) };
-      s.failure ??= s.finalizationFailure;
-      s.phase = "failed";
-      s.reason = errorMessage(error);
-      await save().catch(() => {
-      });
-      try {
-        final = await persistOutcome(s);
-      } catch (error2) {
-        await store.event("final_report_failed", { reason: errorMessage(error2) }).catch(() => {
-        });
-      }
-    }
-    try {
-      await store.release(Boolean(s.pending));
-    } catch (error) {
-      if (await store.hasLiveOwnership()) {
-        if (s.finalizationFailure) s.finalizationFailure.cleanupError = errorMessage(error);
-        else s.finalizationFailure = { ...activity, stage: "releasing_ownership", error: errorMessage(error) };
-      }
-      throw outcomeError ?? error;
-    }
-    if (final) {
-      try {
-        emit(final);
-      } catch {
-      }
-    }
-  }
-  return s;
-}
-async function prepareResume(store) {
-  if (store.state.pluginVersion !== VERSION) {
-    throw new LoopError("blocked", `Run was created by plugin ${store.state.pluginVersion}; stop it and start a new run`);
-  }
-  await store.acquire(true);
-  if (store.state.phase === "clean") {
-    try {
-      await persistOutcome(store.state);
-    } finally {
-      await store.release(false);
-    }
-    throw new LoopError("blocked", "This run is already clean; its reservation is released. Start a new run to verify again");
-  }
-  await rm2(join5(store.state.runDir, "stop.request"), { force: true });
-  if (!store.state.pending) {
-    store.state.round = Math.max(store.state.round, ...store.state.workers.map((w) => w.round + 1));
-    store.state.nextRole = "verifier";
-    store.state.stalledCycles = 0;
-  }
-  return store;
-}
-async function stopRun(store, adapter, expected) {
-  if (!await store.acquire(true, expected)) return store.state;
-  try {
-    if (!store.state.pending && ["clean", "blocked", "failed", "limited", "interrupted"].includes(store.state.phase)) {
-      await persistOutcome(store.state);
-      return store.state;
-    }
-    if (store.state.pending?.stage === "admitting") {
-      if (!adapter) throw new Error("Worker reconciliation requires the OpenCode adapter");
-      await adapter.ensurePrompt(store.state.pending.assignment, false);
-      store.state.pending.stage = "submitted";
-    }
-    if (store.state.pending?.stage === "submitted") {
-      const worker = store.state.workers.find((worker2) => worker2.sessionId === store.state.pending.assignment.sessionId && worker2.inputId === store.state.pending.assignment.inputId);
-      if (worker && (!worker.progress || worker.progress === "prepared")) worker.progress = "submitted";
-      await store.save();
-    }
-    if (store.state.pending && (!adapter || !await adapter.interrupt(store.state.pending.assignment))) {
-      throw new LoopError("blocked", "Worker termination is unconfirmed; checkout remains reserved");
-    }
-    delete store.state.pending;
-    delete store.state.requests;
-    store.state.nextRole = "verifier";
-    store.state.phase = "interrupted";
-    store.state.reason = "Stopped by user";
-    await store.save();
-    await persistOutcome(store.state);
-  } finally {
-    await store.release(Boolean(store.state.pending));
-  }
-  return store.state;
-}
-
-// src/manager.ts
 var RunManager = class {
-  constructor(options = {}) {
-    this.options = options;
+  constructor(notify) {
+    this.notify = notify;
   }
-  options;
-  runtimeId = randomUUID2();
+  notify;
+  runs = /* @__PURE__ */ new Map();
   closed = false;
-  active = /* @__PURE__ */ new Map();
-  paused = /* @__PURE__ */ new Map();
-  operations = /* @__PURE__ */ new Set();
-  closing;
-  perform(work) {
-    if (this.closed) return Promise.reject(new LoopError("blocked", "The plugin is unloading; try again after reload"));
-    const promise = work();
-    this.operations.add(promise);
-    void promise.finally(() => this.operations.delete(promise)).catch(() => {
-    });
-    return promise;
-  }
-  launch(store, adapter) {
-    const project = store.state.project;
-    const abort = new AbortController();
-    if (this.closed) abort.abort();
-    const task = { store, abort, promise: Promise.resolve() };
-    this.paused.delete(project);
-    this.active.set(project, task);
-    task.promise = Promise.resolve().then(async () => {
+  start(project, originSessionId, execute) {
+    if (this.closed) throw new LoopError("blocked", "The plugin is unloading; try again after reload");
+    if (this.runs.has(project)) throw new LoopError("blocked", "A verification loop is already running in this checkout");
+    const run = { runId: newId("run"), originSessionId, abort: new AbortController(), promise: Promise.resolve() };
+    this.runs.set(project, run);
+    run.promise = (async () => {
+      let result;
       try {
-        await executeLoop(store, adapter, { ...this.options, signal: abort.signal });
+        result = { runId: run.runId, ...await execute(run.abort.signal, run.runId) };
       } catch (error) {
-        if (!await store.hasLiveOwnership()) return;
-        store.state.phase = "failed";
-        store.state.reason = errorMessage(error);
-        store.state.executor = { pid: process.pid, runtimeId: store.runtimeId };
-        store.state.finalizationFailure ??= {
-          role: store.state.pending?.assignment.role ?? store.state.nextRole,
-          round: store.state.pending?.assignment.round ?? store.state.round,
-          stage: "finalizing",
-          error: errorMessage(error)
-        };
-        store.state.failure ??= store.state.finalizationFailure;
-        await store.event("controller_error", { reason: store.state.reason }).catch(() => {
-        });
-        await store.save().catch(() => {
-        });
-        await persistOutcome(store.state, true).catch(async (error2) => {
-          await store.event("final_report_failed", { reason: errorMessage(error2) }).catch(() => {
-          });
-        });
+        result = run.abort.signal.aborted ? { runId: run.runId, status: "stopped", reason: "Stopped by user" } : { runId: run.runId, status: error instanceof LoopError ? error.outcome : "failed", reason: errorMessage(error) };
       }
-      if (store.state.pending) this.paused.set(project, { store, adapter });
-      try {
-        await this.options.notify?.(store.state);
-      } catch (error) {
-        await store.event("notice_failed", { reason: errorMessage(error) }).catch(() => {
-        });
-      }
-    }).finally(() => {
-      if (this.active.get(project) === task) this.active.delete(project);
-    });
-    return { ...runSummary(store.state), outcome: "started" };
-  }
-  start(project, config, adapter, change, origin) {
-    return this.perform(async () => {
-      if (this.active.has(project)) throw new LoopError("blocked", "A verification loop is already running in this checkout");
-      const store = await prepareRun(project, config, adapter, change, {
-        ...this.options,
-        runtimeId: this.runtimeId,
-        originSessionId: origin?.sessionId,
-        originModel: origin?.model
+      this.runs.delete(project);
+      if (!this.closed) await this.notify(originSessionId, result).catch(() => {
       });
-      return this.launch(store, adapter);
-    });
-  }
-  async store(project, config, runId2) {
-    const root = await realpath4(config.stateDir ?? defaultStateRoot());
-    return new RunStore(await loadRun(runDirectory(root, project, runId2), project), this.options.lockRoot, this.runtimeId);
-  }
-  async status(project, config, runId2) {
-    if (runId2) return runSummary((await this.store(project, config, runId2)).state);
-    let names;
-    try {
-      names = await readdir2(projectRunsDirectory(config.stateDir ?? defaultStateRoot(), project));
-    } catch (error) {
-      if (error.code === "ENOENT") return { outcome: "status", runs: [] };
-      throw error;
-    }
-    const runs = await Promise.all(names.filter((name) => /^run_[a-f0-9]+$/.test(name)).map(async (name) => {
-      try {
-        const store = await this.store(project, config, name);
-        return { summary: runSummary(store.state), updatedAt: store.state.updatedAt };
-      } catch (error) {
-        return { summary: { outcome: "unreadable", runId: name, reason: errorMessage(error) }, updatedAt: 0 };
-      }
-    }));
-    return { outcome: "status", runs: runs.sort((a, b) => b.updatedAt - a.updatedAt).map((run) => run.summary) };
-  }
-  resume(project, config, adapter, runId2, sessionId) {
-    return this.perform(async () => {
-      if (this.active.has(project)) throw new LoopError("blocked", "A verification loop is already running in this checkout");
-      const store = await this.store(project, config, runId2);
-      if (store.state.pluginVersion === VERSION && digest(JSON.stringify(config)) !== digest(JSON.stringify(store.state.config))) {
-        throw new LoopError("blocked", "Plugin configuration changed; restore the original options to resume");
-      }
-      await prepareResume(store);
-      store.state.originSessionId = sessionId;
-      await store.save();
-      return this.launch(store, adapter);
-    });
-  }
-  stop(project, config, adapter, runId2) {
-    return this.perform(async () => {
-      const task = this.active.get(project);
-      if (task && task.store.state.runId === runId2) {
-        await atomicWrite(join6(task.store.state.runDir, "stop.request"), { time: Date.now() });
-        task.abort.abort();
-        let timer;
-        await Promise.race([task.promise, new Promise((resolve6) => {
-          timer = setTimeout(resolve6, this.options.stopWaitMs ?? 2e3);
-        })]);
-        clearTimeout(timer);
-        return { ...runSummary(task.store.state), ...this.active.get(project) === task ? { outcome: "stopping" } : {} };
-      }
-      const store = await this.store(project, config, runId2);
-      const pid = await store.ownerPid();
-      if (pid !== null) {
-        let alive2 = true;
-        try {
-          process.kill(pid, 0);
-        } catch (error) {
-          if (error.code === "ESRCH") alive2 = false;
-          else throw error;
-        }
-        if (alive2) {
-          await atomicWrite(join6(store.state.runDir, "stop.request"), { time: Date.now() });
-          return { ...runSummary(store.state), outcome: "stopping" };
-        }
-      }
-      const state = await stopRun(store, adapter);
-      this.paused.delete(project);
-      return runSummary(state);
-    });
-  }
-  async wait(project) {
-    await this.active.get(project)?.promise;
-  }
-  close() {
-    if (this.closing) return this.closing;
-    this.closed = true;
-    for (const task of this.active.values()) task.abort.abort();
-    this.closing = (async () => {
-      await Promise.allSettled([...this.operations]);
-      const tasks = [...this.active.values()];
-      for (const task of tasks) task.abort.abort();
-      await Promise.all(tasks.map((task) => task.promise));
-      for (const { store, adapter } of this.paused.values()) {
-        const state = store.state;
-        try {
-          await stopRun(new RunStore(state, this.options.lockRoot, this.runtimeId), adapter, store.reservationIdentity);
-        } catch (error) {
-          await new RunStore(state, this.options.lockRoot, this.runtimeId).event("shutdown_reconciliation_failed", { reason: errorMessage(error) }).catch(() => {
-          });
-        }
-      }
-      this.paused.clear();
     })();
-    return this.closing;
+    return { outcome: "started", runId: run.runId };
+  }
+  async stop(project) {
+    const run = this.runs.get(project);
+    if (!run) return { outcome: "not_running", reason: "No verification loop is running in this checkout" };
+    run.abort.abort(new LoopError("stopped", "Stopped by user"));
+    await run.promise;
+    return { outcome: "stopped", runId: run.runId, originSessionId: run.originSessionId };
+  }
+  async close() {
+    this.closed = true;
+    const runs = [...this.runs.values()];
+    for (const run of runs) run.abort.abort(new LoopError("stopped", "Plugin unloading"));
+    await Promise.all(runs.map((run) => run.promise));
   }
 };
 
 // src/tools.ts
-import { z as z6 } from "zod";
+import { z as z3 } from "zod";
 async function registerTool(ctx, service) {
   return ctx.tool.transform((editor) => editor.add({
     name: MANAGEMENT_TOOL,
-    description: "Run, inspect, resume, or stop the OpenSpec verification/fix loop. Each worker uses fresh context. Start returns a durable run ID; inspect status while server-owned work proceeds.",
-    input: z6.toJSONSchema(toolInputSchema),
+    description: "Run or stop the OpenSpec verification/fix loop. Each verification and fix uses a fresh session with this turn's model. Run returns at once; the result arrives as a session notice.",
+    input: z3.toJSONSchema(toolInputSchema),
     options: { permission: MANAGEMENT_TOOL },
     async execute(input, tool) {
       const session = await ctx.session.get({ sessionID: tool.sessionID });
       if (session.metadata?.openspecVerifyLoop) throw new Error("Loop workers cannot invoke loop management");
       const action = actionSchema.parse(input);
-      if (action.action !== "status") await ctx.permission.assert({
+      await ctx.permission.assert({
         sessionID: tool.sessionID,
         agent: tool.agent,
         action: MANAGEMENT_TOOL,
@@ -1805,7 +516,7 @@ async function protectContext(ctx, event) {
   const input = messages.findLast((message) => message.type === "user" || message.type === "synthetic");
   if (input?.type === "synthetic" && input.metadata?.openspecLoopNotice === true) {
     event.tools = {};
-    event.system.push({ type: "text", text: "This turn only reports the latest OpenSpec loop notice. State its outcome and run/report location concisely. Use the saved progress counts to distinguish completed worker outputs from accepted reports; prepared assignments do not prove execution. Counts marked incomplete are lower bounds. Include outstanding findings and the failing role/stage when present. Do not perform work, invoke tools, or claim clean unless the notice says clean." });
+    event.system.push({ type: "text", text: "This turn only reports the latest OpenSpec loop notice. State its status, change, round count and reason concisely, and summarize any remaining issues, or the checks it lists as Not verified, from its report. Do not perform work, invoke tools, start another run, or claim clean unless the notice says clean." });
   }
 }
 async function setupPlugin(ctx) {
@@ -1824,16 +535,14 @@ ${JSON.stringify(result)}`,
       resume: true
     });
   };
-  const manager = new RunManager({ notify: async (state) => {
-    if (state.originSessionId) await notice(state.originSessionId, runSummary(state));
-  } });
+  const manager = new RunManager(notice);
   const service = new LoopService(ctx, manager);
   const registrations = [];
   try {
     registrations.push(await ctx.session.hook("context", (event) => protectContext(ctx, event)));
     registrations.push(await registerTool(ctx, service));
-    const skillPath = fileURLToPath2(new URL("../skills/openspec-verify-loop/SKILL.md", import.meta.url));
-    const content = await readFile6(skillPath, "utf8");
+    const skillPath = fileURLToPath2(new URL("../opencode/SKILL.md", import.meta.url));
+    const content = await readFile2(skillPath, "utf8");
     registrations.push(await ctx.skill.transform((editor) => editor.add({
       id: Skill.ID.make("openspec-verify-loop"),
       name: Skill.Name.make("openspec-verify-loop"),

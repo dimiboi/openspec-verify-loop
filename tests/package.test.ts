@@ -5,7 +5,10 @@ import { cp, mkdir, mkdtemp, readFile, rm, writeFile, access } from 'node:fs/pro
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { command } from '../src/util.js';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+const git = (cwd: string, ...args: string[]) => promisify(execFile)('git', args, {cwd});
 
 test('Git packaging ships the prebuilt plugin without invoking child npm', {skip: !process.env.npm_execpath}, async t => {
   // Exercise the npm resolver used by the developer/CI, with a deliberately
@@ -19,19 +22,17 @@ test('Git packaging ships the prebuilt plugin without invoking child npm', {skip
   const repo = join(root, 'source with spaces');
   await mkdir(repo);
   const pkg = JSON.parse(await readFile('package.json', 'utf8'));
-  for (const path of ['dist', 'skills', 'LICENSE', 'README.md']) await cp(resolve(path), join(repo, path), {recursive: true});
+  for (const path of ['dist', 'bb', 'skills', 'opencode', 'LICENSE', 'README.md']) await cp(resolve(path), join(repo, path), {recursive: true});
   const marker = join(root, 'child-npm-called');
   const unavailableNpm = join(root, 'unavailable-npm.js');
   await writeFile(unavailableNpm, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'called');process.exit(73);`);
   const options = {cache: join(root, 'cache'), npmBin: unavailableNpm, Arborist};
   const commit = async () => {
-    assert.equal((await command(['git', 'add', '.'], repo)).exitCode, 0);
-    const result = await command(['git', '-c', 'user.name=Packaging test', '-c', 'user.email=test@example.invalid',
-      'commit', '-m', 'Packaging fixture'], repo);
-    assert.equal(result.exitCode, 0, result.stderr);
-    return (await command(['git', 'rev-parse', 'HEAD'], repo)).stdout.trim();
+    await git(repo, 'add', '.');
+    await git(repo, '-c', 'user.name=Packaging test', '-c', 'user.email=test@example.invalid', 'commit', '-m', 'Packaging fixture');
+    return (await git(repo, 'rev-parse', 'HEAD')).stdout.trim();
   };
-  assert.equal((await command(['git', 'init', repo], root)).exitCode, 0);
+  await git(root, 'init', repo);
   await writeFile(join(repo, 'package.json'), JSON.stringify({...pkg, scripts: {...pkg.scripts, build: 'unused'}}));
   const brokenRevision = await commit();
   const spec = `git+${pathToFileURL(repo).href}`;
@@ -46,7 +47,7 @@ test('Git packaging ships the prebuilt plugin without invoking child npm', {skip
   await assert.rejects(access(marker), {code: 'ENOENT'});
   const files: string[] = [];
   await tar.t({file: archive, onentry: (entry: {path: string}) => files.push(entry.path)});
-  for (const path of ['dist/index.js', 'skills/openspec-verify-loop/SKILL.md',
-    'skills/openspec-verify-loop/references/report-contract.md']) assert(files.includes(`package/${path}`), path);
+  for (const path of ['dist/index.js', 'bb/server.ts', 'skills/openspec-verify-loop/SKILL.md',
+    'skills/openspec-verify-loop/verify-loop.js', 'opencode/SKILL.md']) assert(files.includes(`package/${path}`), path);
   assert(!files.some(path => path.includes('node_modules/')));
 });

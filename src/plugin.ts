@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { configSchema } from './config.js';
 import { registerCommands } from './commands.js';
-import { RunManager, runSummary } from './manager.js';
+import { RunManager } from './manager.js';
 import { LoopService } from './service.js';
 import { registerTool } from './tools.js';
 import { MANAGEMENT_TOOL } from './workers.js';
@@ -24,7 +24,7 @@ export async function protectContext(ctx: Plugin.Context, event: Parameters<Para
   const input = messages.findLast(message => message.type === 'user' || message.type === 'synthetic');
   if (input?.type === 'synthetic' && input.metadata?.openspecLoopNotice === true) {
     event.tools = {};
-    event.system.push({type: 'text', text: 'This turn only reports the latest OpenSpec loop notice. State its outcome and run/report location concisely. Use the saved progress counts to distinguish completed worker outputs from accepted reports; prepared assignments do not prove execution. Counts marked incomplete are lower bounds. Include outstanding findings and the failing role/stage when present. Do not perform work, invoke tools, or claim clean unless the notice says clean.'});
+    event.system.push({type: 'text', text: 'This turn only reports the latest OpenSpec loop notice. State its status, change, round count and reason concisely, and summarize any remaining issues, or the checks it lists as Not verified, from its report. Do not perform work, invoke tools, start another run, or claim clean unless the notice says clean.'});
   }
 }
 
@@ -39,15 +39,13 @@ export async function setupPlugin(ctx: Plugin.Context) {
       description: 'OpenSpec verification loop', metadata: {openspecLoopNotice: true},
       delivery: 'queue', resume: true});
   };
-  const manager = new RunManager({notify: async state => {
-    if (state.originSessionId) await notice(state.originSessionId, runSummary(state));
-  }});
+  const manager = new RunManager(notice);
   const service = new LoopService(ctx, manager);
   const registrations: {dispose(): Promise<void>}[] = [];
   try {
     registrations.push(await ctx.session.hook('context', event => protectContext(ctx, event)));
     registrations.push(await registerTool(ctx, service));
-    const skillPath = fileURLToPath(new URL('../skills/openspec-verify-loop/SKILL.md', import.meta.url));
+    const skillPath = fileURLToPath(new URL('../opencode/SKILL.md', import.meta.url));
     const content = await readFile(skillPath, 'utf8');
     registrations.push(await ctx.skill.transform(editor => editor.add({
       id: Skill.ID.make('openspec-verify-loop'), name: Skill.Name.make('openspec-verify-loop'),

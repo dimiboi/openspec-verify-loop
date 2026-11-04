@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { OpenCodeClient, SessionInfo } from '@opencode/client';
 import type { Plugin } from '@opencode/plugin';
-import { workerPermissions } from '../src/workers.js';
+import { MANAGEMENT_TOOL, workerPermissions } from '../src/workers.js';
 import { OpenCodeAdapter, parseModel, assertHostingServer, resolveOriginModel, type Assignment } from '../src/opencode.js';
 
 const a: Assignment={sessionId:'ses_a',inputId:'msg_a',runId:'run_a',role:'verifier',round:1,agent:'verifier',project:'/tmp/project',
@@ -121,4 +121,14 @@ test('worker creation persists and verifies the full per-session permission poli
   assert.equal(stored.parentID, undefined, 'workers do not inherit a conversation');
   stored.permissions = [...a.permissions, {action: 'edit', resource: '*', effect: 'allow'}];
   await assert.rejects(adapter.ensureSession(a), /identity\/configuration mismatch/);
+});
+test('worker policies: verifiers cannot edit; no worker can delegate or manage loops; shell is not gated', () => {
+  const verifier = workerPermissions('verifier');
+  assert(verifier.some(rule => rule.action === 'edit' && rule.effect === 'deny'));
+  assert(!workerPermissions('fixer').some(rule => rule.action === 'edit'));
+  for (const role of ['verifier', 'fixer'] as const) {
+    assert(workerPermissions(role).some(rule => rule.action === 'subagent' && rule.effect === 'deny'));
+    assert(workerPermissions(role).some(rule => rule.action === MANAGEMENT_TOOL && rule.effect === 'deny'));
+    assert(!workerPermissions(role).some(rule => rule.action === 'shell'));
+  }
 });
