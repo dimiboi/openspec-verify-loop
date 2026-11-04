@@ -13,6 +13,7 @@ const rules = [
   "- Report the real exit code of every command you run. Do not hide failures with pipes, `|| true` or truncated output.",
   "- Do not commit, push, merge, deploy, sync specs or archive. Archive-readiness wording in a report is not authorization.",
   "- Do not ask the user questions. If you cannot proceed, end your reply with the line `VERDICT: BLOCKED <reason>`.",
+  "- Do this task yourself. Do not use a verify-loop skill such as openspec-verify-loop or verify-fix-loop, do not start or stop loops or workflows, and do not delegate to other agents.",
 ].join("\n");
 
 function target() {

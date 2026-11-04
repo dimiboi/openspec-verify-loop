@@ -12,7 +12,7 @@
 - A report whose only gaps are `Not verified` checks ends `unverified`, decided from both its `VERDICT: UNVERIFIED` line and the report text. A change without `design.md` passes Design Adherence: verifiers mark it Not applicable, not Not verified. Fixers never create optional artifacts to clear a check.
 - Never resubmit a worker prompt. OpenCode 2.2.5 can restart execution for duplicate input IDs: reconcile an uncertain submission by its input ID, and fail the run if it is not found.
 - Plugin cleanup must interrupt the active worker before unloading completes.
-- On OpenCode, workers cannot start or stop loops or delegate further workers, and reporting turns cannot use tools. bb does not enforce this yet; see [docs/known-issues.md](docs/known-issues.md).
+- On OpenCode, workers cannot start or stop loops or delegate further workers, and reporting turns cannot use tools. On bb, the server entry hides the skill from Workflows workers and the prompts forbid loops, but `bb workflows run` stays reachable from a worker's shell; see [docs/known-issues.md](docs/known-issues.md).
 
 The automated suite uses fake host/model adapters; it must not call models or start OpenCode sessions. Real-host testing is manual; see [docs/verification.md](docs/verification.md).
 

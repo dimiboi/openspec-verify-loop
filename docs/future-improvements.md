@@ -27,7 +27,6 @@ ID for reference.
 | --- | --- | --- |
 | C08 | bb: a server-entry command that reads the starting thread's permission mode and refuses `accept-edits`. OpenCode: notify the starting session of a worker's permission request and keep polling instead of ending the run. | A run starts from an unsupported mode and stalls, or ending on a permission request costs a run the user would have approved. |
 | C40 | bb: a stall detector that finds a running call's worker thread and polls `bb thread interactions list`; a pending request stops the run. Needs a background service in the bb server entry. | An `auto` or `full` worker stalls on an approval request in a real run. |
-| C13 | bb: an `agents.configure` hook that hides the loop skill from worker threads. | A bb worker starts a loop or workflow. |
 | C41 | A worker scope rule in the shared prompt rules: stay inside the checkout, do not search the filesystem or other repositories, never set `BB_*` variables or act as another thread. It instructs; it does not enforce. | A worker changes anything outside the checkout, or acts as another bb thread with a command that changes state (so far only read-only commands were seen; see known issues). |
 | C14 | bb: refuse a start while a `queued` or `running` run exists on the same environment. | Two bb loops run in one checkout. |
 | C25 | A per-run time limit (needs per-host code, since workflow scripts have no clock). | Runs stall in ways the round limit does not catch. |

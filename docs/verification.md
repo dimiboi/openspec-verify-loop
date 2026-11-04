@@ -26,7 +26,7 @@ session or bb workflow is started.
   double-quoted `Not verified` not blocking clean while a backticked one and a
   quoted count still do, `VERDICT: ISSUES` with only a `Not verified` check going to the fixer,
   change and store pass-through, the change name from round 1's
-  report title, a missing title, the worker rules per role (including the checkout no-edit rule with its
+  report title, a missing title, the worker rules per role (including the no-loop rule for every worker, the checkout no-edit rule with its
   temporary-file allowance and the absent-design rule for verifiers only), and the loader
   rejecting `Date`, `Math.random` and `process`.
 - **Runner** (`tests/runner.test.ts`): `agent()` over the real session adapter
@@ -40,6 +40,9 @@ session or bb workflow is started.
   session model switch, unavailable models, missing and duplicate verify skills,
   worker rejection, tool-less reporting turns, the host endpoint check, and
   session-adapter reconciliation.
+- **bb server entry** (`tests/bb-server.test.ts`): the agent configuration
+  hides the skill from Workflows workers, keeps it for other origins, always
+  returns `tools`, and names the skill as its frontmatter does.
 - **Packaging** (`tests/package.test.ts`, `scripts/validate-plugin.mjs`): npm's
   resolver against a local Git fixture reproduces the preparation failure a
   `build` script causes, then confirms the package ships `dist/index.js`,
@@ -84,6 +87,10 @@ restrictions seen so far; bb's validator is the authority.
    `acp-opencode-default-compat` profile (see the README's ACP section), picking
    the skill from the `/` menu or naming it in the prompt. Confirm that workers
    run on Flint and the run reaches a verdict.
+7. During a run, compare the staged catalogs in
+   `~/.bb/runtime/global-skills/*/catalog.json` that the run created. Confirm
+   that worker catalogs (those without the `workflows` skill) do not list
+   `openspec-verify-loop`, and that a new user thread still lists it.
 
 ### OpenCode 2.2.5
 
@@ -132,6 +139,8 @@ the names the runs used; the renamed-commands row checks the new names.
 | Workflow validation (`pass-absent-optional-design` task 2.2) | 2026-11-04 | bb 0.48.1 | `pass-absent-optional-design` on top of `block-unrecognized-verdicts`, uncommitted on `d75a895` | `bb workflows validate --script --json` | `"valid": true` (6284 bytes), `literalSelections: []` |
 | Workflow validation (`ignore-quoted-not-verified` task 3.2) | 2026-11-04 | bb 0.48.1 | `ignore-quoted-not-verified`, with the Final Assessment rule, on top of the two changes above, uncommitted on `d75a895` | `bb workflows validate --script --json` | `"valid": true` (7188 bytes), `literalSelections: []` |
 | Workflow validation (`verifier-temp-files` task 2.2) | 2026-11-04 | bb 0.48.1 | `verifier-temp-files`, uncommitted on `3e3561c` | `bb workflows validate --script --json` | `"valid": true` (7321 bytes), `literalSelections: []` |
+| Workflow validation (`hide-loop-skill-from-bb-workers` task 3.2) | 2026-11-04 | bb 0.48.1 | `hide-loop-skill-from-bb-workers`, uncommitted on `a9919cd` | `bb workflows validate --script --json` | `"valid": true` (7509 bytes), `literalSelections: []` |
+| bb, hidden skill (`hide-loop-skill-from-bb-workers` task 3.3) | 2026-11-04 | bb 0.48.1, `claude-sonnet-5-5`, medium, `auto`, sandbox worktree | `hide-loop-skill-from-bb-workers`, uncommitted on `a9919cd`, installed from the worktree path | `wfr_be7980a5-6eb5-4593-9780-1c23605c85b8` on `add-greeting`, started from sub-thread `thr_ig22kysmsj` | `clean` after 2 verifications and 1 fix. The worker catalog `32eab9bc` (no `workflows` skill) did not list `openspec-verify-loop`; the user thread's catalog `ea96d041` did. Only the three workers ran, and none ran `bb workflows` or `bb_workflow_run`; bb-openspec's `verify-fix-loop` stayed visible to workers |
 | bb, Claude (task 4.3) | 2026-11-02 | bb 0.48.1, `claude-sonnet-5-5`, medium, `auto` | `ffdf462` + `67c4e13` | `wfr_a1ec773a-5fba-4c08-befd-b81c62a26593` | `clean` after 3 verifications; all 5 workers inherited the thread's model, reasoning and mode; one preview; the completion report started no run |
 | bb stop (task 4.3) | 2026-11-02 | same thread | same | `wfr_ebfc225d-d798-4eba-beb4-758376265d7e` | `bb workflows stop` from the thread; run cancelled; no relaunch; started as `/openspec-verify-loop add-greeting --max-rounds 2`, whose arguments file held `{"change": "add-greeting", "maxRounds": 2, …}` |
 | bb, local Flint (task 4.4) | 2026-11-03 | bb 0.48.1, `acp-opencode-default-compat`, `lmstudio/recursivesi/flint`, medium, `full` | `f0ecef7` | `wfr_e055674e-5a28-4802-ba50-e9db7644cb2e` | `clean` after 2 verifications; workers on Flint; the completion report started no run |

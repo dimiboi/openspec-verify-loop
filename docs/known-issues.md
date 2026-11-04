@@ -23,12 +23,14 @@ workaround is gone.
   not stop this case: a worker runs as the same user and can read the secret.
   Stopping an agent from posing as another thread needs per-thread credentials
   that the server checks against the claimed thread.
-- **Effect on the plugin:** on bb nothing stops a worker from starting or
-  stopping a loop. The worker prompts do not forbid it, and a worker in `full`
-  mode can run `bb workflows run`, even as another thread. On OpenCode the loop
-  tool is denied to workers by session permissions.
-- **Mitigation:** none yet; see C13 and C41 in
-  [future improvements](future-improvements.md).
+- **Effect on the plugin:** on bb the server entry hides the
+  `openspec-verify-loop` skill from Workflows workers, and the worker prompts
+  forbid starting or stopping loops or workflows. Neither stops a worker in
+  `full` mode from typing `bb workflows run` in its shell, even as another
+  thread. On OpenCode the loop tool is denied to workers by session
+  permissions.
+- **Mitigation:** the hidden skill and the prompt rule. Impersonation stays
+  open; see C41 in [future improvements](future-improvements.md).
 
 ### Workflows rejects models with an empty reasoning list
 

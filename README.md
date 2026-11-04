@@ -30,8 +30,9 @@ optional artifacts to satisfy a check.
 A verifier reply whose last line is not one of the four verdicts, such as an
 empty or truncated reply, ends the run `blocked` without a fixer.
 Workers use the starting session's model, run one at a
-time in the same checkout, and are told not to ask questions and not to commit,
-push, merge, deploy, sync specs or archive. Verifiers are told not to edit,
+time in the same checkout, and are told not to ask questions, not to commit,
+push, merge, deploy, sync specs or archive, and not to start loops or workflows or
+delegate to other agents. Verifiers are told not to edit,
 create or delete files in the checkout; temporary files outside it, such as
 command output under `/tmp`, are allowed.
 
@@ -67,7 +68,8 @@ plugin does not check the mode.
 ```
 
 The skill starts one workflow and posts its preview. Workers inherit the
-thread's provider, model, reasoning level and permission mode. Without a change,
+thread's provider, model, reasoning level and permission mode. Workers do not
+see the skill, so they cannot start a loop through it. Without a change,
 the first verifier selects the only active change; with several active changes
 the run ends `blocked` and lists them. When the run ends, the thread reports the
 result from the workflow's completion notice and starts no new run. To stop a

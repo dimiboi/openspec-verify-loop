@@ -231,6 +231,7 @@ test('worker rules: only verifiers are forbidden to edit; every prompt carries t
     assert.match(prompt, /real exit code/);
     assert.match(prompt, /Do not commit, push, merge, deploy, sync specs or archive/);
     assert.match(prompt, /Do not ask the user questions/);
+    assert.match(prompt, /Do this task yourself\. Do not use a verify-loop skill .*, do not start or stop loops or workflows, and do not delegate to other agents/);
     assert.match(prompt, /VERDICT: BLOCKED <reason>/);
   }
 });
