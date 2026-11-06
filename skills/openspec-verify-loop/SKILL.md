@@ -52,6 +52,9 @@ a change for the user.
    bb workflows run --script "$(cat "<dir>/verify-loop.js")" --args "$(cat "$BB_THREAD_STORAGE/verify-loop-args.json")" --json
    ```
 
+   If the command fails, report its error and stop. Do not retry it or start
+   the workflow another way.
+
 4. The command returns `{runId, name, status}`. Post this line once, on its
    own, with the returned run ID, then end the turn without waiting:
 

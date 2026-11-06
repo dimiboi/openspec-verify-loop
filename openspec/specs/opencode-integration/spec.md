@@ -11,9 +11,10 @@ workers.
 ### Requirement: OpenCode plugin package
 The package SHALL install as an OpenCode plugin from its Git repository without
 running a build or other npm lifecycle script. It SHALL register the
-`/opsx-verify-loop` and `/opsx-verify-loop-stop` commands, the `openspec_verify_loop` tool
-and the `openspec-verify-loop` skill. Loading the plugin SHALL start no work,
-and the plugin SHALL refuse to load on any OpenCode version other than 2.2.5.
+`/opsx-verify-loop`, `/opsx-verify-loop-stop` and `/opsx-verify-loop-report`
+commands, the `openspec_verify_loop` tool and the `openspec-verify-loop` skill.
+Loading SHALL start no work, and SHALL fail on any OpenCode version other
+than 2.2.5 or with invalid options.
 
 #### Scenario: Git install
 - **WHEN** OpenCode installs the package from Git
@@ -23,12 +24,17 @@ and the plugin SHALL refuse to load on any OpenCode version other than 2.2.5.
 - **WHEN** the plugin loads in an OpenCode version other than 2.2.5
 - **THEN** loading fails with an error naming the required version
 
+#### Scenario: Invalid plugin options
+- **WHEN** the plugin options contain an unknown key, a `server` that is not a URL, or a `maxRounds` that is not a positive integer
+- **THEN** loading fails and no command or tool runs a loop
+
 ### Requirement: Start a run
 The `/opsx-verify-loop [change]` command, and the tool's `run` action with optional
 `change`, `store` and `maxRounds`, SHALL start the shared loop script in the
-background. The call returns at once with outcome `started` and the selected
-worker model. A second start in the same checkout while a run is active SHALL be
-refused.
+background and return at once with outcome `started` and the worker model. A
+start SHALL be refused while the checkout has an active run or an unconfirmed
+worker, and before any worker is created when its arguments are invalid, the
+directory is outside Git, or the plugin instance is unloading.
 
 #### Scenario: Start returns immediately
 - **WHEN** the user runs `/opsx-verify-loop add-export`
@@ -37,6 +43,22 @@ refused.
 #### Scenario: Already running
 - **WHEN** a run is active in the checkout and another start is requested
 - **THEN** the second start is refused and the active run continues
+
+#### Scenario: Failed run still owns a worker
+- **WHEN** a run has reported failure but its worker's termination is unconfirmed and another start is requested in that checkout
+- **THEN** the second start is refused and the response identifies the worker requiring cleanup
+
+#### Scenario: Invalid arguments
+- **WHEN** a command receives more than one argument or a change name that is not kebab-case, or the tool receives an unknown field, a field its action does not accept, or a `maxRounds` that is not a positive integer
+- **THEN** the call is refused with an error and no worker is created
+
+#### Scenario: Not a Git checkout
+- **WHEN** the invoking session's directory is not inside a Git checkout
+- **THEN** the start is refused as blocked, saying the project must be a Git checkout
+
+#### Scenario: Plugin unloading
+- **WHEN** a start reaches a plugin instance that is unloading, or whose unload cleanup failed
+- **THEN** the start is refused as blocked and asks the user to retry after reload
 
 ### Requirement: Workers use the invoking model
 Workers SHALL use the model and variant of the turn that invoked the loop: the
@@ -53,6 +75,14 @@ other model SHALL be substituted.
 - **WHEN** the invoking model is not available in the project's model list
 - **THEN** the run does not start and the result names the unavailable model
 
+#### Scenario: Base model without listed variants
+- **WHEN** the invoking model has no variant, or the `default` variant, and the project's model list names no variants for it
+- **THEN** the run starts with that model
+
+#### Scenario: Model cannot be identified
+- **WHEN** the tool's generating message is not an assistant message, or a command's session has no model selection and no earlier model in its history
+- **THEN** the run does not start and the result is blocked, saying the invoking model cannot be identified
+
 ### Requirement: Procedure path from the skill catalogue
 The plugin SHALL find exactly one `openspec-verify-change` skill for the
 project and pass its path to the loop. If it finds none, or several, the run
@@ -62,15 +92,20 @@ SHALL NOT start.
 - **WHEN** the project advertises no `openspec-verify-change` skill
 - **THEN** the run does not start and the result says the verify skill is missing
 
+#### Scenario: Several verify skills
+- **WHEN** the project advertises more than one `openspec-verify-change` skill
+- **THEN** the run does not start and the result lists the path of every copy
+
 ### Requirement: Worker sessions and permissions
-Each worker SHALL be a new session in the checkout on the plugin's own hosting
-server. Verifier sessions SHALL be denied the edit tool. Every worker session
-SHALL be denied subagents and the `openspec_verify_loop` tool. A worker session
-SHALL NOT be able to start, or stop, a loop.
+Each worker SHALL be a new session in the invoking project directory within the
+checkout, on the plugin's own hosting server. Verifier sessions SHALL be denied
+the edit tool. Every worker session SHALL be denied subagents and the
+`openspec_verify_loop` tool. A worker session SHALL NOT be able to start, or
+stop, a loop.
 
 #### Scenario: Verifier session
 - **WHEN** a verifier session is created
-- **THEN** its permissions deny the edit tool, subagents and the loop tool, and it runs in the checkout directory
+- **THEN** its permissions deny the edit tool, subagents and the loop tool, and it runs in the invoking project directory
 
 #### Scenario: Worker tries to start a loop
 - **WHEN** a worker session calls the loop tool or a loop command
@@ -79,7 +114,11 @@ SHALL NOT be able to start, or stop, a loop.
 ### Requirement: No prompt resubmission
 Each worker prompt SHALL be submitted at most once. If the submission's outcome
 is uncertain, the plugin SHALL look for the prompt by its input identity. If the
-prompt is not found, the run SHALL fail without resubmitting.
+prompt is not found, the run SHALL fail without resubmitting, and its reason
+SHALL include the submission error. A failure before the prompt is submitted
+SHALL end the run with that failure, not as an uncertain submission. A worker
+session holding input other than the loop's prompt SHALL end the run without a
+submission.
 
 #### Scenario: Lost submission response
 - **WHEN** the prompt submission errors but the prompt appears in the session
@@ -87,46 +126,101 @@ prompt is not found, the run SHALL fail without resubmitting.
 
 #### Scenario: Submission not visible
 - **WHEN** the prompt submission errors and the prompt does not appear in the session
-- **THEN** the run fails and no second prompt is sent
+- **THEN** the run fails, its reason includes the submission error, and no second prompt is sent
+
+#### Scenario: Read fails before submission
+- **WHEN** a request that inspects the worker session before submission fails
+- **THEN** the run fails with that request's error and no prompt is sent
+
+#### Scenario: Unexpected input before submission
+- **WHEN** the new worker session already holds input with another identity, or input with the prompt's identity but different text
+- **THEN** the run fails and no prompt is sent
 
 ### Requirement: Worker waiting for input ends the run
-If a worker session waits for a permission or a question, the run SHALL end. Its
-result SHALL name the worker session and the pending request, and the worker
-SHALL be interrupted.
+If a worker session waits for a permission or a question, the loop SHALL stop
+executing and interrupt that worker. With confirmed interruption the result
+SHALL be `blocked`, naming the session and request. With unconfirmed interruption
+the result SHALL be `failed`, naming the session, request and cleanup failure,
+and the checkout SHALL remain reserved for cleanup.
 
 #### Scenario: Permission request
-- **WHEN** a verifier session raises a permission request
-- **THEN** the run ends, the result names that session and the request, and the session is interrupted
+- **WHEN** a verifier session raises a permission request and interruption succeeds
+- **THEN** the run ends blocked, the result names that session and the request, and the session is interrupted
+
+#### Scenario: Permission request cannot be interrupted
+- **WHEN** a worker raises a permission request and its interruption cannot be confirmed
+- **THEN** the run ends failed with the worker session, pending request and cleanup failure in its reason
+- **AND** the checkout remains reserved and another explicit stop can retry cleanup
 
 ### Requirement: Stop and unload
-The `/opsx-verify-loop-stop` command and the tool's `stop` action SHALL interrupt the
-active worker and end the run as stopped. Unloading the plugin SHALL interrupt
-the active worker before the plugin finishes unloading.
+The stop command and tool action SHALL report `stopped` only after the worker
+is confirmed inactive. Unconfirmed cleanup SHALL return `failed` and retain the
+checkout reservation for a later explicit stop. Cancellation accepted before
+the run's terminal result is committed SHALL win over completion. Plugin cleanup
+SHALL interrupt retained workers before succeeding; unconfirmed cleanup SHALL
+reject unload cleanup and remain retryable.
 
 #### Scenario: User stops a run
-- **WHEN** the user runs `/opsx-verify-loop-stop` during a fix
+- **WHEN** the user runs `/opsx-verify-loop-stop` during a fix and interruption succeeds
 - **THEN** the fixer session is interrupted and the run ends as stopped
 
 #### Scenario: Stop from the starting session
-- **WHEN** the session that started the run runs `/opsx-verify-loop-stop`
+- **WHEN** the session that started the run runs `/opsx-verify-loop-stop` and the run sends its stopped notice
 - **THEN** that session receives only the run's `stopped` notice, not a second notice for the stop command
 
 #### Scenario: Stop from another session
-- **WHEN** a different session in the checkout runs `/opsx-verify-loop-stop`
+- **WHEN** a different session in the checkout runs `/opsx-verify-loop-stop` and interruption succeeds
 - **THEN** the run's `stopped` notice goes to the starting session, and the stopping session receives the stop command's result
 
 #### Scenario: Plugin unload during a run
-- **WHEN** OpenCode unloads the plugin while a worker runs
+- **WHEN** OpenCode unloads the plugin while a worker runs and interruption succeeds
 - **THEN** that worker session is interrupted before unloading completes
 
+#### Scenario: Stop cannot confirm interruption
+- **WHEN** an explicit stop gets a negative interruption confirmation or an interruption request throws
+- **THEN** the stop returns failed with the worker session and cleanup failure in its reason
+- **AND** no successful stop is reported and the checkout remains reserved without automatic background retries
+
+#### Scenario: Later stop retries retained cleanup
+- **WHEN** a run has failed with unconfirmed cleanup and a later explicit stop confirms that the retained worker is inactive
+- **THEN** the stop returns stopped, the checkout reservation is released, and a new run can start
+- **AND** cleanup submits no worker prompt and starts no new worker
+
+#### Scenario: Stop during the final observation
+- **WHEN** a stop is accepted while the final worker observation is pending and before the run's terminal result is committed
+- **THEN** the run and stop response report stopped once the worker is confirmed inactive
+- **AND** the completion notice does not report clean
+
+#### Scenario: Stop after completion was committed
+- **WHEN** a successful run's terminal result has already been committed and its reservation released before a stop arrives
+- **THEN** the stop returns not_running and does not change the completed result
+
+#### Scenario: Unload encounters retained cleanup failure
+- **WHEN** plugin cleanup cannot confirm termination of an active worker or one retained after a failed run
+- **THEN** cleanup rejects with the worker identity and failure instead of resolving successfully
+- **AND** cleanup does not dispose the loop controls before the worker can be cleaned up, and a later cleanup attempt can retry
+
 ### Requirement: Result notice
-When a run ends, the starting session SHALL receive one queued notice carrying
-the run's result or failure. The turn that reports the notice SHALL have no
-tools.
+When loop execution ends, the starting session SHALL receive one queued notice
+with its result or failure. The reporting turn SHALL have no tools. Cleanup
+failure notices SHALL identify the worker and retained checkout reservation.
+Later stop attempts SHALL receive their own outcome without sending another
+terminal run notice; a command reply SHALL be suppressed only when the same
+invocation already answered its caller through the run notice.
 
 #### Scenario: Run ends
 - **WHEN** a run ends with any status
 - **THEN** the starting session receives a notice with that result, and the reporting turn cannot call tools
+
+#### Scenario: Failed stop from the starting session
+- **WHEN** the starting session requests a stop that causes the run to end with unconfirmed cleanup
+- **THEN** that session receives the failure and retained-worker information once for that invocation
+- **AND** the response does not claim stopped
+
+#### Scenario: Cleanup retry from the starting session
+- **WHEN** the starting session retries a stop after the run has already sent its failure notice
+- **THEN** that stop receives its cleanup outcome even though the caller is the original session
+- **AND** no second terminal notice is sent for the failed run
 
 ### Requirement: Script runs under workflow rules
 The plugin SHALL run the shared script with the globals the bb workflow
@@ -137,3 +231,146 @@ as it would on bb.
 #### Scenario: Script uses the clock
 - **WHEN** the loop script calls `Date.now()`
 - **THEN** the run fails with an error instead of reading the clock
+
+### Requirement: Worker cleanup ownership
+The plugin SHALL retain a dispatched worker's identity and ability to interrupt
+it until its terminal state is confirmed. If a request fails while the worker
+may still run, it SHALL attempt cleanup before releasing the checkout.
+Unconfirmed cleanup SHALL end execution as failed, preserve the original cause
+and cleanup failure, and retain the checkout reservation. Cleanup SHALL NOT
+resubmit a prompt.
+
+#### Scenario: Observation request fails during a fix
+- **WHEN** a fixer may be active and a request used to observe it fails
+- **THEN** the plugin attempts to interrupt that fixer, starts no further workers and reports the observation failure
+- **AND** the checkout is released only after termination is confirmed
+
+#### Scenario: Observation failure and cleanup failure
+- **WHEN** an observation request fails and interruption cannot be confirmed
+- **THEN** the failed result includes the original error, worker session and cleanup failure
+- **AND** another run is refused until explicit cleanup succeeds
+
+#### Scenario: Prompt admission remains uncertain
+- **WHEN** submission errors and reconciliation cannot establish whether the prompt was admitted
+- **THEN** the loop fails without a second submission and attempts cleanup of the possibly active worker
+- **AND** unconfirmed cleanup retains the checkout reservation
+
+#### Scenario: Cancellation during worker creation
+- **WHEN** a stop is accepted while a new worker session is being created and before its prompt is submitted
+- **THEN** the plugin does not dispatch a new prompt after discovering the cancellation
+- **AND** any session or possibly admitted work is reconciled and cleaned up before ownership is released
+
+### Requirement: Invoking directory and checkout identity
+The plugin SHALL discover project skills and available models and run workers
+from the invoking session's effective directory, including a represented
+subpath. Checkout reservations SHALL use the canonical Git checkout root, so
+different invoking directories or aliases in that checkout share one
+reservation. Stopping from any directory in that checkout SHALL address the
+same retained run.
+
+#### Scenario: Nested OpenSpec project
+- **WHEN** a session invokes a loop from `/repo/packages/app` with its own OpenSpec project
+- **THEN** project discovery and workers use `/repo/packages/app` rather than `/repo`
+- **AND** the reservation is shared by the whole `/repo` checkout
+
+#### Scenario: Session represents its directory with a subpath
+- **WHEN** the host represents the invoking directory as a checkout location plus `packages/app` as its session subpath
+- **THEN** project discovery and worker execution retain the effective `/repo/packages/app` directory
+
+#### Scenario: Sibling project or alias requests another run
+- **WHEN** a checkout has an active run or retained cleanup and a session in a sibling directory or canonical path alias requests a run
+- **THEN** the second start is refused under the same checkout reservation
+- **AND** a stop from that session targets the existing worker without changing its working directory
+### Requirement: Host connection
+To start a run, the plugin SHALL connect to its own hosting OpenCode server:
+the endpoint in the `server` option, or else a discovered OpenCode 2.2.5
+service. It SHALL refuse a configured endpoint that is not HTTP(S) or carries
+credentials, a query or a fragment before sending any request to it. The
+endpoint SHALL be the plugin's own process, report OpenCode 2.2.5, and serve
+the invoking session unchanged; otherwise the run SHALL NOT start.
+
+#### Scenario: No discoverable service
+- **WHEN** no `server` option is set and no OpenCode 2.2.5 service can be discovered
+- **THEN** the run does not start and the result is blocked, naming the `server` option
+
+#### Scenario: Invalid configured endpoint
+- **WHEN** the `server` option uses another scheme, or contains credentials, a query or a fragment
+- **THEN** the run does not start and no request, and so no token, is sent to that endpoint
+
+#### Scenario: Endpoint is another server
+- **WHEN** the endpoint answers from another process, or reports the invoking session with a different creation time, directory or metadata
+- **THEN** the run does not start and the result is blocked, saying the endpoint is not the plugin's hosting server
+
+#### Scenario: Server version differs
+- **WHEN** the server reports an OpenCode version other than 2.2.5 while the project catalogue is read
+- **THEN** the run does not start and the result names both versions
+
+### Requirement: Worker session identity
+Each worker session SHALL be created with an identity the plugin assigns, so a
+lost creation response can be reconciled by that identity. Before submission
+and on every observation, the session SHALL match the worker's agent, model and
+variant, run, input identity, directory and permissions; otherwise the run
+SHALL fail without submitting the prompt or using the session's output.
+
+#### Scenario: Lost creation response
+- **WHEN** session creation errors but a session with the assigned identity exists and matches the worker
+- **THEN** the plugin uses that session and creates no second session
+
+#### Scenario: Creation fails
+- **WHEN** session creation errors and no session with the assigned identity exists
+- **THEN** the run fails with the creation error and no prompt is sent
+
+#### Scenario: Session does not match
+- **WHEN** the session with the assigned identity has a different agent, model, variant, run, input identity, directory or permission policy
+- **THEN** the run fails with a mismatch error naming the observed and expected configuration, and no prompt is sent
+
+### Requirement: Worker outcome
+A worker's reply SHALL be used only when its session ended successfully after
+the loop's prompt, with a complete final assistant response from the worker's
+agent and model. Any other ending SHALL fail the run with a reason that names
+the worker session and how it ended, and the plugin SHALL clean up the worker
+as for any other worker failure.
+
+#### Scenario: Worker ends unsuccessfully
+- **WHEN** the worker session ends with a failed or interrupted outcome
+- **THEN** the run fails, naming the session, its outcome and its error
+
+#### Scenario: Incomplete final response
+- **WHEN** the worker's last assistant message has an error, did not finish with a stop, or has no completion time
+- **THEN** the run fails, saying the worker ended without a complete final response
+
+#### Scenario: Worker changed agent or model
+- **WHEN** the worker's final response comes from a different agent, model or variant
+- **THEN** the run fails, saying the worker changed agent or model
+
+#### Scenario: Unexpected input during the run
+- **WHEN** the worker session receives input with another identity while the loop observes it
+- **THEN** the run fails, saying the result cannot be correlated
+
+#### Scenario: Transcript cannot be collected
+- **WHEN** the worker's message pages repeat a cursor, or the transcript exceeds 20,000 messages
+- **THEN** the run fails with that error and the worker is cleaned up
+
+### Requirement: Undelivered results
+An undelivered result notice SHALL be logged with its run ID and kept pending
+in memory, apart from the checkout reservation. The `report` action and
+`/opsx-verify-loop-report` SHALL return the checkout's pending results, retry
+each notice, and say whether each was delivered; a delivered result leaves the
+list. Any loaded instance in the server SHALL be able to recover an unloaded
+instance's results. Pending results are lost on a server restart.
+
+#### Scenario: Notice delivery fails
+- **WHEN** a run ends and its notice cannot be delivered
+- **THEN** the error and run ID are logged, the result stays pending, and a new run can start in the checkout
+
+#### Scenario: Retry delivers the result
+- **WHEN** the user runs the report action after a failed delivery and the notice can now be delivered
+- **THEN** the reply lists the result as delivered, the starting session receives the notice, and the result leaves the pending list
+
+#### Scenario: Retry fails again
+- **WHEN** the report action retries a notice that still cannot be delivered
+- **THEN** the reply lists the result as not delivered and it stays pending
+
+#### Scenario: Notice during unload
+- **WHEN** a run ends while its plugin instance unloads
+- **THEN** no notice is sent from that instance, and another loaded instance can recover the result with the report action

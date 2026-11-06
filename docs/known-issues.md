@@ -78,6 +78,34 @@ repository has to be installed with `path:`.
 
 ## OpenCode
 
+### Plugin unload discards controls after cleanup rejects
+
+- **What happens:** OpenCode 2.2.5 removes a project plugin after its async
+  cleanup callback rejects. The callback's rejection does not preserve the
+  plugin instance or its commands. An immediate plugin-list read can still
+  report active before removal completes.
+- **Observed:** 2026-11-04, existing host PID 84809, isolated
+  `verify-loop-native-unload-uJoSP5/app` fixture. Removing the project's plugin
+  configuration while worker
+  `ses_1a1a7a4ab7a14babdca2dfd4fb198632e82d03a395b` was active invoked cleanup
+  for run `run_1a1a7a4ab7aa3baaac4f1b4491bb9f2157e4c6e2966`. A test-only adapter
+  injected an interruption error; the real plugin cleanup rejected with that
+  worker's identity. The worker remained busy, the plugin then disappeared,
+  and `/opsx-verify-loop-stop` returned CommandNotFoundError. The test directly
+  interrupted and waited for the native worker afterward. No service was
+  started, replaced or stopped.
+- **Effect on the plugin:** a failed stop retains its worker and reservation
+  while the plugin remains loaded, but a host-forced unload discards that
+  instance's controls. Another loaded instance shares the checkout reservation
+  and can retry stop; a full module reload loses in-memory ownership. The plugin
+  cannot prevent that host behavior by rejecting its cleanup callback. Normal unload, with confirmed interruption,
+  passed in the same fixture.
+- **Workaround:** if unload fails, use OpenCode's native session controls to
+  interrupt the named worker and confirm it is inactive before starting another
+  loop. Reinstalling/reloading the plugin does not prove that worker stopped.
+  This change adds no cross-reload lock or service-management workaround.
+- **Tracked:** not reported upstream.
+
 ### A resubmitted input ID restarts a finished session
 
 - **What happens:** in OpenCode 2.2.5, submitting a prompt again with an input ID
@@ -102,8 +130,13 @@ plugin skills live outside OpenCode's skill folders. Pick the skill from bb's
 
 ### Testing notes
 
-- A new folder's project plugin and skills appear only after `opencode reload`
-  in that folder; the first catalogue read after the reload can still be empty.
+- A newly loaded location's first catalogue read can be empty. In the
+  2026-11-04 hardening checks, a fixture configured before its first load
+  advertised its local package plugin and skill after subsequent reads,
+  without a global reload. Supply a local plugin package directory with its
+  manifest, and wait for the advertised plugin/skill before starting a check.
+  `opencode reload` rebuilds every loaded location; do not use it just to refresh
+  an isolated manual fixture.
 - `opencode run "/opsx-verify-loop …"` sends the slash text as a prompt, not as a
   command. Native commands can be sent headlessly with the client's
   `session.command({sessionID, name, text})`.

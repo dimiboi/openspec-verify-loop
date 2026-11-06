@@ -73,6 +73,37 @@ test('a clean verdict contradicted by the report counts as issues', async () => 
   }
 });
 
+test('emphasis around positive severity counts cannot hide contradictions in either verdict', async () => {
+  for (const severity of ['critical', 'warning', 'suggestion']) {
+    for (const mark of ['*', '**', '_', '__', '`']) {
+      for (const count of [`${mark}1${mark} ${severity}`, `1 ${mark}${severity}${mark}`, `${mark}1 ${severity}${mark}`]) {
+        for (const heading of ['', '### Final Assessment\n']) {
+          for (const verdict of ['CLEAN', 'UNVERIFIED']) {
+            const report = `## Verification Report: add-export\n${heading}${count}\nTests: Not verified\nVERDICT: ${verdict}`;
+            // CLEAN must also be contradicted by the count alone, independent of skipped checks.
+            const input = verdict === 'CLEAN' ? report.replace('Tests: Not verified\n', '') : report;
+            assert.equal((await run([input], {maxRounds: 1})).result.status, 'limit', input);
+          }
+        }
+      }
+    }
+  }
+  const report = '## Verification Report: add-export\n### Final Assessment\n1 **warning** to fix.\nVERDICT: CLEAN';
+  const {result, roles, calls} = await run([report, 'Fixed.', CLEAN]);
+  assert.deepEqual(roles, ['Verify', 'Fix', 'Verify']);
+  assert.equal(result.status, 'clean');
+  assert(calls[1]!.prompt.includes(report), 'normalization never alters the report sent to the fixer');
+});
+
+test('emphasized zero counts and counts outside the Final Assessment stay clean', async () => {
+  for (const count of ['**0** warnings', '0 _suggestions_', '`0` critical issues']) {
+    const report = `## Verification Report: add-export\n### Final Assessment\n${count}\nVERDICT: CLEAN`;
+    assert.equal((await run([report])).result.status, 'clean');
+  }
+  const report = '## Verification Report: add-export\nCoverage quotes 1 **warning**.\n### Final Assessment\nAll checks passed.\nVERDICT: CLEAN';
+  assert.equal((await run([report])).result.status, 'clean');
+});
+
 test('only a check marked Not verified blocks clean, not the words quoted in prose', async () => {
   const quoted = '## Verification Report: add-export\nThe clean rule needs no nonzero count or "not verified" (verify-loop.js).\nAll checks passed.\nVERDICT: CLEAN';
   assert.equal((await run([quoted])).result.status, 'clean');
@@ -244,4 +275,15 @@ test('the loader rejects clock, randomness and process access like the workflow 
   await assert.rejects(runScript(`${meta}return process.pid;`, host), TypeError);
   assert.equal(await runScript(`${meta}return [meta.name, Math.max(1, 2), await agent("x")];`, host).then(JSON.stringify), '["probe",2,""]');
   assert.throws(() => runScript('const x = 1;', host), /export const meta/);
+});
+
+test('invalid round limits reject before starting a worker', async () => {
+  for (const maxRounds of [0, -1, 1.5, NaN, Infinity, '2', null]) {
+    let calls = 0;
+    await assert.rejects(runScript(source, {
+      agent: async () => {calls++; return CLEAN;}, phase: () => {}, log: () => {},
+      args: {maxRounds}, budget: () => ({maxAgentCalls: 100}),
+    }), /maxRounds must be a positive integer/);
+    assert.equal(calls, 0);
+  }
 });

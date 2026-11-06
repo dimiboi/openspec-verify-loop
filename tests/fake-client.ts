@@ -30,7 +30,6 @@ export function fakeClient(options: FakeOptions = {}) {
   const client = {
     location: {get: async () => ({})},
     server: {info: async () => ({version: '2.2.5', pid: process.pid})},
-    agent: {list: async () => ({data: [{id: 'build', mode: 'primary', permissions: []}]})},
     skill: {list: async () => ({data: options.skills ?? [{id: 'openspec-verify-change', name: 'openspec-verify-change', path: '/p/.opencode/skills/openspec-verify-change/SKILL.md'}]})},
     model: {list: async () => ({data: options.models ?? [{id: 'test', providerID: 'fake', enabled: true, variants: [{id: 'high'}]}]})},
     session: {
@@ -72,4 +71,11 @@ export function fakeClient(options: FakeOptions = {}) {
 export async function until(condition: () => boolean) {
   for (let i = 0; i < 2000 && !condition(); i++) await new Promise(resolve => setTimeout(resolve, 2));
   if (!condition()) throw new Error('condition not reached');
+}
+
+export function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((yes, no) => {resolve = yes; reject = no;});
+  return {promise, resolve, reject};
 }

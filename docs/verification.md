@@ -18,7 +18,10 @@ session or bb workflow is started.
   trailing period around a verdict, an unrecognized verifier result blocking
   without a fixer (also on the last round), a fixer reply with no verdict,
   `VERDICT: CLEAN` contradicted by a severity count or
-  `Not verified`, the `unverified` stop (also on the last round),
+  `Not verified`, emphasis/code marks around positive critical/warning/suggestion
+  counts in both CLEAN and UNVERIFIED reports, emphasized zero counts staying
+  clean and emphasized counts before the Final Assessment being ignored,
+  the `unverified` stop (also on the last round),
   `VERDICT: UNVERIFIED` contradicted by a severity count or by no `Not verified`
   check, Design Adherence marked Not applicable for a missing `design.md` not blocking
   clean, a Final Assessment deciding clean and unverified while earlier
@@ -31,18 +34,53 @@ session or bb workflow is started.
   rejecting `Date`, `Math.random` and `process`.
 - **Runner** (`tests/runner.test.ts`): `agent()` over the real session adapter
   with a fake client. Covers one submission, a lost response reconciled without
-  resubmitting, an invisible submission failing, a permission request that
-  interrupts and names the session, abort, and per-role permissions.
+  resubmitting, an invisible submission failing with its submission error, a
+  failed read before submission keeping its cause with no prompt sent, a lost
+  creation response reconciled without a second session, a failed creation
+  sending no prompt, a permission request that
+  interrupts and names the session, failed observation cleanup, a permission
+  wait whose cleanup fails while retaining its worker and original cause,
+  abort, and per-role permissions. Uncertain admission is cleaned up without
+  a second submission. Deferred responses cover stop during session creation,
+  final observation and a lost admission response; no prompt is sent after
+  cancellation is discovered and cleanup waits for admission reconciliation.
 - **Manager** (`tests/manager.test.ts`): one run per checkout, stop, plugin
-  dispose interrupting active workers, and one notice per run.
+  dispose interrupting active workers, and one notice per run. False or thrown
+  cleanup failures retain the checkout until an explicit retry succeeds;
+  concurrent stops and close share one in-flight cleanup attempt, and no
+  background retry or prompt submission occurs. Cancellation wins before
+  terminal result commitment, close retries retained failed workers, and close
+  waits for an already pending failure notice before disposal or retry reporting.
+  A result left by unload is recovered and delivered by another instance.
 - **Plugin** (`tests/plugin.test.ts`, `tests/opencode.test.ts`): command
-  parsing, options, registrations and disposal, the invoking model after a
+  parsing, options (invalid ones fail loading), registrations and disposal, the invoking model after a
   session model switch, unavailable models, missing and duplicate verify skills,
-  worker rejection, tool-less reporting turns, the host endpoint check, and
-  session-adapter reconciliation.
+  worker rejection, tool input with unknown or misplaced fields or a bad round
+  limit refused before approval, tool-less reporting turns, the host endpoint
+  check, a hosting server with another process, creation time, directory or
+  metadata, no discoverable service, a server reporting another version, and
+  session-adapter reconciliation. Input other than the loop prompt, or the
+  prompt's identity with other text, fails before submission; an interrupted
+  outcome is reported as interrupted; a repeated message cursor or a
+  transcript over 20,000 messages fails collection. Adapter interruption still runs after an
+  inbox request fails; confirmation rejects unresolved inbox/cancel errors,
+  queued input, active or busy execution, while a missing session is inactive.
+  Commands and tools answer every explicit cleanup retry without another
+  terminal run notice. Failed plugin unload keeps controls and replies available
+  and permits a successful cleanup retry before disposing registrations once.
 - **bb server entry** (`tests/bb-server.test.ts`): the agent configuration
   hides the skill from Workflows workers, keeps it for other origins, always
   returns `tools`, and names the skill as its frontmatter does.
+- **Project context** (`tests/context.test.ts`): temporary Git/OpenSpec fixtures
+  cover nested directories, root-plus-subpath, nested-plus-subpath and symlink
+  aliases. Discovery and workers use the nested project, while sibling and alias
+  starts share the canonical checkout reservation and sibling stops keep the
+  original worker directory. Nested Git checkout fixtures verify direct and
+  root-plus-subpath sessions share the effective checkout's reservation for
+  active runs, failed cleanup and explicit stop retries in both directions.
+  Adapter fixtures retain model/metadata/permission mismatch rejection for
+  every directory representation. A directory outside any Git checkout is
+  refused as blocked.
 - **Packaging** (`tests/package.test.ts`, `scripts/validate-plugin.mjs`): npm's
   resolver against a local Git fixture reproduces the preparation failure a
   `build` script causes, then confirms the package ships `dist/index.js`,
@@ -109,7 +147,85 @@ restrictions seen so far; bb's validator is the authority.
    `openspec_verify_loop`). Confirm the result is `blocked` with "Loop workers
    cannot invoke the loop management interface" and no session is created.
 
+6. In an isolated nested Git project, create a worker through the adapter using
+   the invoking subdirectory. Read the native session's location/subpath and
+   confirm the effective directory and nearest OpenSpec root remain nested.
+   OpenCode 2.2.5 can return an already nested location with a subpath relative
+   to the Git root; do not append that subpath to the nested location again.
+7. Exercise a rejected interruption through an isolated test plugin/adapter,
+   then stop again. Confirm failure retains the reservation and worker identity,
+   another start is refused, and a successful retry replies without another
+   terminal notice. Unload with an active worker and with retained failed cleanup;
+   record whether the host honors or ignores rejection of the cleanup callback.
+   Remove the isolated project's plugin configuration to invoke native unload,
+   keeping a test-only wrapper log of callback start/success/rejection. Scoped
+   cache eviction can return while a worker is still active and is not proof
+   that plugin cleanup finished. Do not reload all loaded locations or manage
+   the OpenCode service for this check.
+
 ## Recorded results
+
+### Hardening checks (2026-11-04)
+
+Native directory round-trip on the existing OpenCode 2.2.5 host (PID 84809), in
+the isolated Git fixture `verify-loop-hardening-native-J2XlVq/packages/app`:
+
+- Worker `ses_1a1a799ff72da6a28b1315941a89d3b89de1f32140e`, assignment
+  `run_1a1a799ff72cb56d6240d8d44d7a376f5228f9e8668`, created through the updated
+  adapter at 17:27 UTC. Native creation and repeated identity validation passed.
+- Both `location.directory` and the effective directory remained the nested
+  `packages/app`; native `subpath` was `packages/app`, relative to the Git root.
+  `openspec list --json` from the effective directory found that nested root
+  and the `add-app` fixture change.
+- The worker used the configured `lmstudio/recursivesi/flint` model reference
+  for session creation. No prompt or model request was submitted in this path
+  check. Interruption was confirmed and the empty test session was removed.
+
+The audit's fake-adapter probes and this empty-session round-trip are not
+evidence for active-worker stop or native plugin unload behavior. Those checks
+are recorded separately when executed.
+
+Active-worker checks used the existing OpenCode 2.2.5 host and the configured
+`lmstudio/recursivesi/flint#default` model in the isolated
+`verify-loop-native-lifecycle-ioWa2G/packages/app` fixture at 17:34 UTC. A local
+test plugin delegates to the updated plugin setup and real host adapter; a
+fixture marker injects interruption failure without modifying the production
+adapter. Notices were inspected in both delivered context and queued inbox
+items, since reporting turns can leave later notices queued.
+
+| Check | Run and worker | Outcome |
+| --- | --- | --- |
+| Normal stop | `run_1a1a7a042f710b094abea6e465ca3796933d57f48f8`, `ses_1a1a7a042f9c4ec2beadd854bf097c6561318f34a0f` | Active worker interrupted; one terminal notice says stopped. |
+| Failed stop and explicit retry | `run_1a1a7a044471e667a5eaca141eb8a0be4201124351e`, `ses_1a1a7a04447b2954c42007147ffb6d407c20bfc0ea9` | Injected interruption error produced a failed notice identifying the worker and retained reservation; another start was blocked; removing the marker and stopping again returned stopped without a second terminal notice. |
+
+Native plugin unload was exercised by removing only the isolated project's
+plugin configuration in `verify-loop-native-unload-uJoSP5/app`, with a
+test-only wrapper recording the real cleanup callback. The same host/model
+was used; no global reload or service operation was performed.
+
+| Check | Date and run | Outcome |
+| --- | --- | --- |
+| Normal native unload | 2026-11-04 17:37 UTC, `run_1a1a7a308bac65d7a204e724d8884518f7142980a1a`, worker `ses_1a1a7a308ba0ee88d3b360c4718bc18ef17e9c3a034` | Callback logged start, real interruption and success; the worker was interrupted/inactive when cleanup finished. |
+| Rejected native unload | 2026-11-04 17:39 UTC, `run_1a1a7a4ab7aa3baaac4f1b4491bb9f2157e4c6e2966`, worker `ses_1a1a7a4ab7a14babdca2dfd4fb198632e82d03a395b` | Injected interruption failure made the real callback reject. Before direct test cleanup, the worker remained active, but OpenCode removed the plugin and stop command; an explicit retry returned CommandNotFoundError. The test then interrupted the worker with native session controls and waited for inactivity. |
+
+This failure case verifies the plugin's rejection and exposes an upstream
+limit, rather than proving the host preserves cleanup controls. See
+[the known issue](known-issues.md#plugin-unload-discards-controls-after-cleanup-rejects).
+
+The exact shared script passed `bb workflows validate --script --json` on
+2026-11-04: `valid: true`, 7377 source bytes, no literal model selections. This
+validated the script without starting a workflow. `npm ci` and `npm run check`
+passed on Node 26.13.0 with 88 deterministic tests, type checking, bundle
+generation and package validation; that suite used no live host or model.
+
+After the reservation-key follow-up on 2026-11-04, `npm ci` and `npm run check`
+passed on Node 26.13.0 with 90 deterministic tests, type checking, bundle
+generation and package validation. Both new nested Git checkout cases failed
+against the earlier implementation and passed with the reservation derived
+from the effective directory for start and stop. These checks used fake
+adapters only; no native session or model request was started.
+
+### Earlier host checks
 
 Manual runs for the `unified-verify-loop-mvp` change, against a sandbox repository
 whose `add-greeting` change had two known defects (wrong greeting format and a

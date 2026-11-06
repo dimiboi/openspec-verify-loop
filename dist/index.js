@@ -13,6 +13,7 @@ var configSchema = z.strictObject({
 });
 
 // src/service.ts
+import { realpath as realpath2 } from "node:fs/promises";
 import { z as z2 } from "zod";
 
 // src/loop.ts
@@ -34,9 +35,10 @@ function runScript(source, host) {
 // src/opencode.ts
 import { OpenCode } from "@opencode/client";
 import { Service } from "@opencode/client/service";
+import { resolve as resolve2 } from "node:path";
 
 // src/util.ts
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
@@ -49,11 +51,11 @@ var LoopError = class extends Error {
   }
   outcome;
 };
-function digest(value) {
-  return createHash("sha256").update(value).digest("hex");
-}
 function newId(prefix) {
   return `${prefix}_${Date.now().toString(16)}${randomUUID().replaceAll("-", "")}`;
+}
+function sessionDirectory(session, checkoutRoot) {
+  return resolve(session.subpath ? checkoutRoot : session.location.directory, session.subpath ?? ".");
 }
 async function projectRoot(path) {
   const cwd = await realpath(resolve(path));
@@ -123,7 +125,7 @@ async function assertHostingServer(version, origin, client) {
     client.server.info(request()),
     client.session.get({ sessionID: origin.id }, request())
   ]);
-  if (info.pid !== process.pid || info.version !== version || remote.id !== origin.id || remote.time.created !== origin.time.created || remote.location.directory !== origin.location.directory || digest(JSON.stringify(remote.metadata ?? {})) !== digest(JSON.stringify(origin.metadata ?? {}))) {
+  if (info.pid !== process.pid || info.version !== version || remote.id !== origin.id || remote.time.created !== origin.time.created || remote.location.directory !== origin.location.directory || JSON.stringify(remote.metadata ?? {}) !== JSON.stringify(origin.metadata ?? {})) {
     throw new LoopError("blocked", "The recovery endpoint is not this plugin hosting server");
   }
 }
@@ -135,16 +137,13 @@ var OpenCodeAdapter = class {
   async catalog(project) {
     const location = { directory: project };
     await this.client.location.get({ location }, request());
-    const [info, agents, models] = await Promise.all([
+    const [info, models] = await Promise.all([
       this.client.server.info(request()),
-      this.client.agent.list({ location }, request()),
       this.client.model.list({ location }, request())
     ]);
     const skills = await this.client.skill.list({ location }, request());
     if (info.version !== OPENCODE_VERSION) throw new LoopError("blocked", `OpenCode ${OPENCODE_VERSION} is required; server reports ${info.version}`);
     return {
-      version: info.version,
-      agents: agents.data,
       skills: skills.data,
       models: models.data.map((m) => ({ id: m.id, providerID: m.providerID, enabled: m.enabled, variants: m.variants.map((v) => v.id) }))
     };
@@ -162,7 +161,7 @@ var OpenCodeAdapter = class {
           id: a.sessionId,
           agent: a.agent,
           model: a.model,
-          location: { directory: a.project },
+          location: { directory: a.directory ?? a.project },
           title: `OpenSpec ${a.role} ${a.round}: ${a.runId}`,
           metadata: { openspecVerifyLoop: a.runId, inputId: a.inputId },
           permissions: a.permissions
@@ -178,13 +177,15 @@ var OpenCodeAdapter = class {
     this.validateSession(a, session);
   }
   validateSession(a, session) {
-    if (session.agent !== a.agent || session.model?.id !== a.model.id || session.model.providerID !== a.model.providerID || (session.model.variant ?? "default") !== (a.model.variant ?? "default") || session.metadata?.openspecVerifyLoop !== a.runId || session.metadata?.inputId !== a.inputId || session.location.directory !== a.project || digest(JSON.stringify(session.permissions)) !== digest(JSON.stringify(a.permissions))) {
+    const directory = a.directory ?? a.project;
+    if (session.agent !== a.agent || session.model?.id !== a.model.id || session.model.providerID !== a.model.providerID || (session.model.variant ?? "default") !== (a.model.variant ?? "default") || session.metadata?.openspecVerifyLoop !== a.runId || session.metadata?.inputId !== a.inputId || ![a.project, directory].includes(resolve2(session.location.directory)) || sessionDirectory(session, a.project) !== directory || JSON.stringify(session.permissions) !== JSON.stringify(a.permissions)) {
       throw new Error(`Session identity/configuration mismatch: ${JSON.stringify({
         agent: session.agent,
         model: session.model,
         location: session.location,
+        subpath: session.subpath,
         runId: session.metadata?.openspecVerifyLoop,
-        expected: { agent: a.agent, model: a.model, project: a.project, runId: a.runId }
+        expected: { agent: a.agent, model: a.model, project: a.project, directory, runId: a.runId }
       })}`);
     }
   }
@@ -206,13 +207,19 @@ var OpenCodeAdapter = class {
       return;
     }
     if (!allowSubmission) throw new LoopError("blocked", "Prompt admission is uncertain and no saved input is visible; no automatic resubmission is safe. Inspect/stop this worker before starting another run.");
-    await this.client.session.prompt({
-      sessionID: a.sessionId,
-      id: a.inputId,
-      text: a.prompt,
-      metadata: { openspecVerifyLoop: a.runId },
-      delivery: "queue"
-    }, request());
+    try {
+      await this.client.session.prompt({
+        sessionID: a.sessionId,
+        id: a.inputId,
+        text: a.prompt,
+        metadata: { openspecVerifyLoop: a.runId },
+        delivery: "queue"
+      }, request());
+    } catch (error) {
+      await this.ensurePrompt(a, false).catch((reconcile) => {
+        throw new LoopError(reconcile instanceof LoopError ? reconcile.outcome : "failed", `${errorMessage(reconcile)} Submission error: ${errorMessage(error)}`);
+      });
+    }
   }
   async messages(sessionID) {
     const result = [];
@@ -254,6 +261,7 @@ var OpenCodeAdapter = class {
     const tail = messages.slice(inputIndex + 1);
     const idle = tail.findLast((m) => m.type === "idle");
     if (!idle || idle.type !== "idle") return { status: "running" };
+    if (!session.outcome) return { status: "running" };
     if (idle.outcome !== "succeeded" || session.outcome !== "succeeded") {
       return { status: idle.outcome === "interrupted" ? "interrupted" : "failed", reason: JSON.stringify(idle.error ?? { outcome: idle.outcome }) };
     }
@@ -264,12 +272,24 @@ var OpenCodeAdapter = class {
     if (final.agent !== a.agent || final.model.id !== a.model.id || final.model.providerID !== a.model.providerID || (final.model.variant ?? "default") !== (a.model.variant ?? "default")) {
       return { status: "failed", reason: "Worker changed agent or model" };
     }
-    return { status: "completed", messageId: final.id, text: final.content.filter((c) => c.type === "text").map((c) => c.text).join("\n") };
+    return { status: "completed", text: final.content.filter((c) => c.type === "text").map((c) => c.text).join("\n") };
   }
   async interrupt(a) {
     try {
-      const inbox = await this.client.session.inbox.list({ sessionID: a.sessionId }, request());
-      for (const item of inbox) await this.client.session.inbox.cancel({ sessionID: a.sessionId, inboxID: item.id }, request());
+      let inboxError;
+      try {
+        const inbox = await this.client.session.inbox.list({ sessionID: a.sessionId }, request());
+        for (const item of inbox) {
+          try {
+            await this.client.session.inbox.cancel({ sessionID: a.sessionId, inboxID: item.id }, request());
+          } catch (error) {
+            inboxError = error;
+          }
+        }
+      } catch (error) {
+        if (isMissing(error)) return true;
+        inboxError = error;
+      }
       await this.client.session.interrupt({ sessionID: a.sessionId, resume: false }, request());
       await this.client.experimental.session.wait({ sessionID: a.sessionId }, request());
       const [s, active, remaining] = await Promise.all([
@@ -277,7 +297,9 @@ var OpenCodeAdapter = class {
         this.client.session.active(request()),
         this.client.session.inbox.list({ sessionID: a.sessionId }, request())
       ]);
-      return !active[a.sessionId] && !remaining.length && (s.time.busy ?? 0) <= (s.time.idle ?? 0);
+      const inactive = !active[a.sessionId] && !remaining.length && (s.time.busy ?? 0) <= (s.time.idle ?? 0);
+      if (!inactive && inboxError) throw inboxError;
+      return inactive;
     } catch (e) {
       if (isMissing(e)) return true;
       throw new Error(`Cannot confirm worker interruption: ${errorMessage(e)}`);
@@ -306,6 +328,7 @@ function createAgent(o) {
       sessionId: newId("ses"),
       inputId: newId("msg"),
       project: o.project,
+      directory: o.directory,
       runId: o.runId,
       round,
       role,
@@ -314,28 +337,49 @@ function createAgent(o) {
       permissions: workerPermissions(role),
       prompt
     };
-    await o.adapter.ensureSession(a);
+    let inactive = false;
+    let cleaning;
+    const clear = () => {
+      inactive = true;
+      o.trackWorker?.();
+    };
+    const worker = { sessionId: a.sessionId, interrupt: () => {
+      if (inactive) return Promise.resolve();
+      return cleaning ??= (async () => {
+        try {
+          if (!await o.adapter.interrupt(a)) throw new Error("interruption was not confirmed");
+          clear();
+        } catch (error) {
+          throw new LoopError("failed", `Worker ${a.sessionId} cleanup failed: ${errorMessage(error)}. Checkout remains reserved; retry stop to clean up this worker.`);
+        }
+      })().finally(() => {
+        cleaning = void 0;
+      });
+    } };
+    o.trackWorker?.(worker);
     try {
-      try {
-        await o.adapter.ensurePrompt(a, true);
-      } catch {
-        await o.adapter.ensurePrompt(a, false);
-      }
+      await o.adapter.ensureSession(a);
+      o.signal.throwIfAborted();
+      await o.adapter.ensurePrompt(a);
       while (true) {
         o.signal.throwIfAborted();
         const observation = await o.adapter.observe(a);
+        if (observation.status === "completed") clear();
+        o.signal.throwIfAborted();
         if (observation.status === "completed") return observation.text;
         if (observation.status === "awaiting_input") {
-          await o.adapter.interrupt(a).catch(() => false);
           throw new LoopError("blocked", `The ${role} session ${a.sessionId} is waiting for input: ${JSON.stringify(observation.requests)}`);
         }
         if (observation.status !== "running") throw new Error(`The ${role} session ${a.sessionId} ${observation.status}: ${observation.reason}`);
         await delay(o.pollMs ?? 2e3, o.signal);
       }
     } catch (error) {
-      if (!o.signal.aborted) throw error;
-      await o.adapter.interrupt(a).catch(() => false);
-      throw o.signal.reason;
+      try {
+        await worker.interrupt();
+      } catch (cleanupError) {
+        throw new LoopError("failed", `${errorMessage(error)}; ${errorMessage(cleanupError)}`);
+      }
+      throw o.signal.aborted ? o.signal.reason : error;
     }
   };
 }
@@ -345,14 +389,15 @@ var changeName = z2.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
 var storeId = z2.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
 var maxRounds = z2.number().int().positive();
 var toolInputSchema = z2.strictObject({
-  action: z2.enum(["run", "stop"]),
+  action: z2.enum(["run", "stop", "report"]),
   change: changeName.optional().describe("Change name; only for run. Omit to let the first verifier select the active change."),
   store: storeId.optional().describe("OpenSpec store ID; only for run."),
   maxRounds: maxRounds.optional().describe("Verification round limit; only for run. Default 5.")
 });
 var actionSchema = z2.discriminatedUnion("action", [
   z2.strictObject({ action: z2.literal("run"), change: changeName.optional(), store: storeId.optional(), maxRounds: maxRounds.optional() }),
-  z2.strictObject({ action: z2.literal("stop") })
+  z2.strictObject({ action: z2.literal("stop") }),
+  z2.strictObject({ action: z2.literal("report") })
 ]);
 var LoopService = class {
   constructor(ctx, manager, connect = connectToHost, pollMs) {
@@ -369,13 +414,16 @@ var LoopService = class {
     const action = actionSchema.parse(input);
     const origin = await this.ctx.session.get({ sessionID: sessionId });
     if (origin.metadata?.openspecVerifyLoop) throw new LoopError("blocked", "Loop workers cannot invoke the loop management interface");
-    const project = await projectRoot(origin.location.directory);
+    const locationRoot = await projectRoot(origin.location.directory);
+    const directory = await realpath2(sessionDirectory(origin, locationRoot));
+    const project = await projectRoot(directory);
     if (action.action === "stop") return this.manager.stop(project);
+    if (action.action === "report") return this.manager.retryReports(project);
     const config = configSchema.parse(this.ctx.options);
     const { adapter } = await this.connect(this.ctx, sessionId, config.server);
     const model = await resolveOriginModel(this.ctx, origin, messageId);
     if (!model) throw new LoopError("blocked", "Cannot identify the invoking model; select a model in this session");
-    const catalog = await adapter.catalog(project);
+    const catalog = await adapter.catalog(directory);
     if (!isAvailable(model, catalog.models)) {
       throw new LoopError("blocked", `Unavailable model ${model.providerID}/${model.id}${model.variant ? `#${model.variant}` : ""}`);
     }
@@ -384,8 +432,8 @@ var LoopService = class {
     if (skills.length > 1) throw new LoopError("blocked", `Expected one openspec-verify-change skill, found ${skills.length}: ${skills.map((skill) => skill.path).join(", ")}`);
     const source = await loadScript();
     const args = { change: action.change, store: action.store, maxRounds: action.maxRounds ?? config.maxRounds, procedurePath: skills[0].path };
-    const started = this.manager.start(project, sessionId, (signal, runId) => runScript(source, {
-      agent: createAgent({ adapter, project, runId, model, signal, pollMs: this.pollMs }),
+    const started = this.manager.start(project, sessionId, (signal, runId, trackWorker) => runScript(source, {
+      agent: createAgent({ adapter, project, directory, runId, model, signal, trackWorker, pollMs: this.pollMs }),
       phase: () => {
       },
       log: () => {
@@ -402,7 +450,7 @@ function isAvailable(model, models) {
 }
 
 // src/commands.ts
-var commandActions = { "opsx-verify-loop": "run", "opsx-verify-loop-stop": "stop" };
+var commandActions = { "opsx-verify-loop": "run", "opsx-verify-loop-stop": "stop", "opsx-verify-loop-report": "report" };
 function parseCommand(name, text) {
   const args = text.trim() ? text.trim().split(/\s+/) : [];
   const action = commandActions[name];
@@ -416,7 +464,7 @@ async function registerCommands(ctx, service, notice) {
   return ctx.command.transform((editor) => {
     for (const name of Object.keys(commandActions)) editor.add({
       name,
-      description: commandActions[name] === "run" ? "Verify and fix an OpenSpec change until clean" : "Stop the running verification loop",
+      description: commandActions[name] === "run" ? "Verify and fix an OpenSpec change until clean" : commandActions[name] === "stop" ? "Stop the running verification loop" : "Retrieve and retry undelivered loop results",
       async execute({ sessionID, prompt }) {
         let result;
         try {
@@ -424,8 +472,8 @@ async function registerCommands(ctx, service, notice) {
         } catch (error) {
           result = failureResult(error);
         }
-        const stopped = result;
-        if (stopped.outcome === "stopped" && stopped.originSessionId === sessionID) return;
+        const answered = result;
+        if (answered.originSessionId === sessionID) return;
         await notice(sessionID, result);
       }
     });
@@ -434,42 +482,100 @@ async function registerCommands(ctx, service, notice) {
 
 // src/manager.ts
 var RunManager = class {
-  constructor(notify) {
+  constructor(notify, registry2 = { owners: /* @__PURE__ */ new Map(), pending: /* @__PURE__ */ new Map() }, log = console.error) {
     this.notify = notify;
+    this.registry = registry2;
+    this.log = log;
   }
   notify;
+  registry;
+  log;
   runs = /* @__PURE__ */ new Map();
   closed = false;
+  release(project, run) {
+    if (!run.worker && this.runs.get(project) === run) {
+      this.runs.delete(project);
+      if (this.registry.owners.get(project) === this) this.registry.owners.delete(project);
+    }
+  }
   start(project, originSessionId, execute) {
     if (this.closed) throw new LoopError("blocked", "The plugin is unloading; try again after reload");
-    if (this.runs.has(project)) throw new LoopError("blocked", "A verification loop is already running in this checkout");
+    const existing = this.registry.owners.get(project)?.runs.get(project);
+    if (existing) throw new LoopError("blocked", existing.result && existing.worker ? `Checkout remains reserved for worker ${existing.worker.sessionId}; retry stop to confirm cleanup` : "A verification loop is already running in this checkout");
     const run = { runId: newId("run"), originSessionId, abort: new AbortController(), promise: Promise.resolve() };
     this.runs.set(project, run);
+    this.registry.owners.set(project, this);
     run.promise = (async () => {
       let result;
       try {
-        result = { runId: run.runId, ...await execute(run.abort.signal, run.runId) };
+        const value = await execute(run.abort.signal, run.runId, (worker) => {
+          run.worker = worker;
+        });
+        run.abort.signal.throwIfAborted();
+        result = { runId: run.runId, ...value };
       } catch (error) {
-        result = run.abort.signal.aborted ? { runId: run.runId, status: "stopped", reason: "Stopped by user" } : { runId: run.runId, status: error instanceof LoopError ? error.outcome : "failed", reason: errorMessage(error) };
+        result = run.abort.signal.aborted && !run.worker ? { runId: run.runId, status: "stopped", reason: "Stopped by user" } : { runId: run.runId, status: error instanceof LoopError ? error.outcome : "failed", reason: errorMessage(error) };
       }
-      this.runs.delete(project);
-      if (!this.closed) await this.notify(originSessionId, result).catch(() => {
-      });
+      run.result = result;
+      this.registry.pending.set(run.runId, { project, run });
+      this.release(project, run);
+      if (!this.closed) await this.report(run);
     })();
     return { outcome: "started", runId: run.runId };
   }
-  async stop(project) {
+  stop(project) {
+    const owner = this.registry.owners.get(project);
+    if (owner && owner !== this) return owner.stop(project);
     const run = this.runs.get(project);
-    if (!run) return { outcome: "not_running", reason: "No verification loop is running in this checkout" };
-    run.abort.abort(new LoopError("stopped", "Stopped by user"));
-    await run.promise;
-    return { outcome: "stopped", runId: run.runId, originSessionId: run.originSessionId };
+    if (!run) return Promise.resolve({ outcome: "not_running", reason: "No verification loop is running in this checkout" });
+    return run.stopping ??= (async () => {
+      const executing = !run.result;
+      if (executing) {
+        run.abort.abort(new LoopError("stopped", "Stopped by user"));
+        await run.promise;
+      } else if (run.worker) {
+        try {
+          await run.worker.interrupt();
+        } catch (error) {
+          return { outcome: "failed", runId: run.runId, reason: errorMessage(error) };
+        }
+      }
+      this.release(project, run);
+      const answered = executing && run.noticeDelivered ? { originSessionId: run.originSessionId } : {};
+      return run.worker ? { outcome: "failed", runId: run.runId, reason: String(run.result?.reason), ...answered } : { outcome: "stopped", runId: run.runId, ...answered };
+    })().finally(() => {
+      run.stopping = void 0;
+    });
   }
   async close() {
     this.closed = true;
-    const runs = [...this.runs.values()];
-    for (const run of runs) run.abort.abort(new LoopError("stopped", "Plugin unloading"));
-    await Promise.all(runs.map((run) => run.promise));
+    const runs = [...this.runs.entries()];
+    const results = await Promise.all(runs.map(([project]) => this.stop(project)));
+    await Promise.all(runs.map(([, run]) => run.promise));
+    const failures = results.filter((result) => result.outcome === "failed");
+    if (failures.length) throw new LoopError("failed", failures.map((result) => result.reason).join("\n"));
+  }
+  async retryReports(project) {
+    const pending = [...this.registry.pending.values()].filter((entry) => entry.project === project);
+    await Promise.all(pending.map(({ run }) => this.report(run)));
+    return { outcome: "reports", results: pending.map(({ run }) => ({ result: run.result, delivered: !!run.noticeDelivered })) };
+  }
+  async reportRetainedFailures() {
+    for (const run of this.runs.values()) await this.report(run);
+  }
+  async report(run) {
+    if (!run.result || run.noticeDelivered) return;
+    return run.reporting ??= (async () => {
+      try {
+        await this.notify(run.originSessionId, run.result);
+        run.noticeDelivered = true;
+        this.registry.pending.delete(run.runId);
+      } catch (error) {
+        this.log(`OpenSpec loop ${run.runId} notice delivery failed: ${errorMessage(error)}`);
+      }
+    })().finally(() => {
+      run.reporting = void 0;
+    });
   }
 };
 
@@ -478,7 +584,7 @@ import { z as z3 } from "zod";
 async function registerTool(ctx, service) {
   return ctx.tool.transform((editor) => editor.add({
     name: MANAGEMENT_TOOL,
-    description: "Run or stop the OpenSpec verification/fix loop. Each verification and fix uses a fresh session with this turn's model. Run returns at once; the result arrives as a session notice.",
+    description: "Run or stop the OpenSpec verification/fix loop, or report to retrieve and retry undelivered results. Each verification and fix uses a fresh session with this turn's model. Run returns at once; the result arrives as a session notice.",
     input: z3.toJSONSchema(toolInputSchema),
     options: { permission: MANAGEMENT_TOOL },
     async execute(input, tool) {
@@ -504,6 +610,7 @@ async function registerTool(ctx, service) {
 }
 
 // src/plugin.ts
+var registry = { owners: /* @__PURE__ */ new Map(), pending: /* @__PURE__ */ new Map() };
 var PLUGIN_ID = "openspec.verify-loop";
 async function protectContext(ctx, event) {
   if (!("tools" in event)) return;
@@ -519,12 +626,12 @@ async function protectContext(ctx, event) {
     event.system.push({ type: "text", text: "This turn only reports the latest OpenSpec loop notice. State its status, change, round count and reason concisely, and summarize any remaining issues, or the checks it lists as Not verified, from its report. Do not perform work, invoke tools, start another run, or claim clean unless the notice says clean." });
   }
 }
-async function setupPlugin(ctx) {
+async function setupPlugin(ctx, connect) {
   if (ctx.app.version !== OPENCODE_VERSION) throw new Error(`openspec-verify-loop requires OpenCode ${OPENCODE_VERSION}`);
   configSchema.parse(ctx.options);
   let unloading = false;
   const notice = async (sessionId, result) => {
-    if (unloading) return;
+    if (unloading) throw new Error("Plugin is unloading; retry result delivery from a loaded instance");
     await ctx.session.synthetic({
       sessionID: sessionId,
       text: `OpenSpec verification loop result (report only; no action requested):
@@ -535,8 +642,8 @@ ${JSON.stringify(result)}`,
       resume: true
     });
   };
-  const manager = new RunManager(notice);
-  const service = new LoopService(ctx, manager);
+  const manager = new RunManager(notice, registry);
+  const service = new LoopService(ctx, manager, connect);
   const registrations = [];
   try {
     registrations.push(await ctx.session.hook("context", (event) => protectContext(ctx, event)));
@@ -560,8 +667,15 @@ ${JSON.stringify(result)}`,
   let cleanup;
   return () => cleanup ??= (async () => {
     unloading = true;
-    await manager.close();
-    await Promise.all(registrations.reverse().map((registration) => registration.dispose()));
+    try {
+      await manager.close();
+      await Promise.all([...registrations].reverse().map((registration) => registration.dispose()));
+    } catch (error) {
+      unloading = false;
+      await manager.reportRetainedFailures();
+      cleanup = void 0;
+      throw error;
+    }
   })();
 }
 var plugin_default = Plugin.define({ id: PLUGIN_ID, setup: setupPlugin });

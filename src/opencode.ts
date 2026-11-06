@@ -1,38 +1,21 @@
-import { OpenCode, type OpenCodeClient, type ModelRef, type AgentInfo, type SkillInfo, type SessionMessageInfo, type SessionInfo } from '@opencode/client';
+import { OpenCode, type OpenCodeClient, type ModelRef, type SkillInfo, type SessionMessageInfo, type SessionInfo } from '@opencode/client';
 import { Service } from '@opencode/client/service';
 import type { Plugin } from '@opencode/plugin';
+import { resolve } from 'node:path';
 import type { Permission } from './workers.js';
-import { LoopError, OPENCODE_VERSION, errorMessage, digest } from './util.js';
+import { LoopError, OPENCODE_VERSION, errorMessage, sessionDirectory } from './util.js';
 
 export type Model = ModelRef;
-export type Catalog = {version: string; agents: AgentInfo[]; skills: SkillInfo[]; defaultModel?: Model;
+export type Catalog = {skills: SkillInfo[];
   models: {id: string; providerID: string; enabled: boolean; variants: string[]}[]};
 export type Assignment = {
-  sessionId: string; inputId: string; project: string; runId: string; round: number;
+  sessionId: string; inputId: string; project: string; directory?: string; runId: string; round: number;
   role: 'verifier' | 'fixer'; agent: string; model: Model; permissions: Permission[]; prompt: string;
 };
 export type Observation = {status: 'running'} | {status: 'awaiting_input'; requests: unknown[]} |
-  {status: 'completed'; text: string; messageId: string} | {status: 'failed' | 'interrupted'; reason: string};
-export interface Adapter {
-  catalog(project: string): Promise<Catalog>;
-  ensureSession(a: Assignment): Promise<void>;
-  ensurePrompt(a: Assignment, allowSubmission?: boolean): Promise<void>;
-  observe(a: Assignment): Promise<Observation>;
-  interrupt(a: Assignment): Promise<boolean>;
-}
+  {status: 'completed'; text: string} | {status: 'failed' | 'interrupted'; reason: string};
 const request = () => ({signal: AbortSignal.timeout(20_000)});
 function isMissing(e: unknown) { return (e as {_tag?: string})?._tag === 'SessionNotFoundError'; }
-
-export function parseModel(input: string): Model {
-  const slash = input.indexOf('/');
-  if (slash < 1 || slash === input.length - 1) throw new Error('Model must be provider/model[#variant]');
-  const rest = input.slice(slash + 1);
-  const hash = rest.lastIndexOf('#');
-  const id = hash < 0 ? rest : rest.slice(0, hash);
-  const variant = hash < 0 ? undefined : rest.slice(hash + 1);
-  if (!id || variant === '') throw new Error('Invalid model reference');
-  return {providerID: input.slice(0, slash), id, ...(variant ? {variant} : {})};
-}
 
 /** A tool call belongs to its generating turn, even if the client switches models while it waits. */
 export async function resolveOriginModel(ctx: Pick<Plugin.Context, 'session'>, origin: SessionInfo, messageId?: string): Promise<Model | undefined> {
@@ -78,23 +61,23 @@ export async function assertHostingServer(version: string, origin: Awaited<Retur
   ]);
   if (info.pid !== process.pid || info.version !== version || remote.id !== origin.id ||
       remote.time.created !== origin.time.created || remote.location.directory !== origin.location.directory ||
-      digest(JSON.stringify(remote.metadata ?? {})) !== digest(JSON.stringify(origin.metadata ?? {}))) {
+      JSON.stringify(remote.metadata ?? {}) !== JSON.stringify(origin.metadata ?? {})) {
     throw new LoopError('blocked', 'The recovery endpoint is not this plugin hosting server');
   }
 }
 
-export class OpenCodeAdapter implements Adapter {
+export class OpenCodeAdapter {
   constructor(public client: OpenCodeClient) {}
   async catalog(project: string): Promise<Catalog> {
     const location = {directory: project};
     await this.client.location.get({location}, request());
-    const [info, agents, models] = await Promise.all([
-      this.client.server.info(request()), this.client.agent.list({location}, request()),
+    const [info, models] = await Promise.all([
+      this.client.server.info(request()),
       this.client.model.list({location}, request()),
     ]);
     const skills = await this.client.skill.list({location}, request());
     if (info.version !== OPENCODE_VERSION) throw new LoopError('blocked', `OpenCode ${OPENCODE_VERSION} is required; server reports ${info.version}`);
-    return {version: info.version, agents: agents.data, skills: skills.data,
+    return {skills: skills.data,
       models: models.data.map(m => ({id: m.id, providerID: m.providerID, enabled: m.enabled, variants: m.variants.map(v => v.id)}))};
   }
   async ensureSession(a: Assignment) {
@@ -104,7 +87,7 @@ export class OpenCodeAdapter implements Adapter {
     if (!session) {
       try {
         session = await this.client.session.create({id: a.sessionId, agent: a.agent, model: a.model,
-          location: {directory: a.project}, title: `OpenSpec ${a.role} ${a.round}: ${a.runId}`,
+          location: {directory: a.directory ?? a.project}, title: `OpenSpec ${a.role} ${a.round}: ${a.runId}`,
           metadata: {openspecVerifyLoop: a.runId, inputId: a.inputId},
           permissions: a.permissions,
         }, request());
@@ -116,12 +99,15 @@ export class OpenCodeAdapter implements Adapter {
     this.validateSession(a, session);
   }
   private validateSession(a: Assignment, session: SessionInfo) {
+    const directory = a.directory ?? a.project;
     if (session.agent !== a.agent || session.model?.id !== a.model.id || session.model.providerID !== a.model.providerID ||
         (session.model.variant ?? 'default') !== (a.model.variant ?? 'default') ||
-        session.metadata?.openspecVerifyLoop !== a.runId || session.metadata?.inputId !== a.inputId || session.location.directory !== a.project ||
-        digest(JSON.stringify(session.permissions)) !== digest(JSON.stringify(a.permissions))) {
+        session.metadata?.openspecVerifyLoop !== a.runId || session.metadata?.inputId !== a.inputId ||
+        ![a.project, directory].includes(resolve(session.location.directory)) || sessionDirectory(session, a.project) !== directory ||
+        JSON.stringify(session.permissions) !== JSON.stringify(a.permissions)) {
       throw new Error(`Session identity/configuration mismatch: ${JSON.stringify({agent: session.agent, model: session.model,
-        location: session.location, runId: session.metadata?.openspecVerifyLoop, expected: {agent: a.agent, model: a.model, project: a.project, runId: a.runId}})}`);
+        location: session.location, subpath: session.subpath, runId: session.metadata?.openspecVerifyLoop,
+        expected: {agent: a.agent, model: a.model, project: a.project, directory, runId: a.runId}})}`);
     }
   }
   async ensurePrompt(a: Assignment, allowSubmission = true) {
@@ -141,9 +127,15 @@ export class OpenCodeAdapter implements Adapter {
       return;
     }
     if (!allowSubmission) throw new LoopError('blocked', 'Prompt admission is uncertain and no saved input is visible; no automatic resubmission is safe. Inspect/stop this worker before starting another run.');
-    // Duplicate IDs can restart an already completed execution in 2.2.5. Never retry an uncertain submission.
-    await this.client.session.prompt({sessionID: a.sessionId, id: a.inputId, text: a.prompt,
-      metadata: {openspecVerifyLoop: a.runId}, delivery: 'queue'}, request());
+    // Duplicate IDs can restart an already completed execution in 2.2.5: reconcile an uncertain submission, never retry it.
+    try {
+      await this.client.session.prompt({sessionID: a.sessionId, id: a.inputId, text: a.prompt,
+        metadata: {openspecVerifyLoop: a.runId}, delivery: 'queue'}, request());
+    } catch (error) {
+      await this.ensurePrompt(a, false).catch(reconcile => {
+        throw new LoopError(reconcile instanceof LoopError ? reconcile.outcome : 'failed', `${errorMessage(reconcile)} Submission error: ${errorMessage(error)}`);
+      });
+    }
   }
   async messages(sessionID: string): Promise<SessionMessageInfo[]> {
     const result: SessionMessageInfo[] = [];
@@ -185,6 +177,7 @@ export class OpenCodeAdapter implements Adapter {
     const tail = messages.slice(inputIndex + 1);
     const idle = tail.findLast(m => m.type === 'idle');
     if (!idle || idle.type !== 'idle') return {status: 'running'};
+    if (!session.outcome) return {status: 'running'};
     if (idle.outcome !== 'succeeded' || session.outcome !== 'succeeded') {
       return {status: idle.outcome === 'interrupted' ? 'interrupted' : 'failed', reason: JSON.stringify(idle.error ?? {outcome: idle.outcome})};
     }
@@ -196,20 +189,32 @@ export class OpenCodeAdapter implements Adapter {
         (final.model.variant ?? 'default') !== (a.model.variant ?? 'default')) {
       return {status: 'failed', reason: 'Worker changed agent or model'};
     }
-    return {status: 'completed', messageId: final.id, text: final.content.filter(c => c.type === 'text').map(c => c.text).join('\n')};
+    return {status: 'completed', text: final.content.filter(c => c.type === 'text').map(c => c.text).join('\n')};
   }
   async interrupt(a: Assignment): Promise<boolean> {
     try {
       // Cancel an admitted-but-not-delivered input as well as active execution.
-      const inbox = await this.client.session.inbox.list({sessionID: a.sessionId}, request());
-      for (const item of inbox) await this.client.session.inbox.cancel({sessionID: a.sessionId, inboxID: item.id}, request());
+      let inboxError: unknown;
+      try {
+        const inbox = await this.client.session.inbox.list({sessionID: a.sessionId}, request());
+        for (const item of inbox) {
+          try { await this.client.session.inbox.cancel({sessionID: a.sessionId, inboxID: item.id}, request()); }
+          catch (error) { inboxError = error; }
+        }
+      } catch (error) {
+        if (isMissing(error)) return true;
+        inboxError = error;
+      }
+      // A failed inbox request must not prevent interrupting active execution.
       await this.client.session.interrupt({sessionID: a.sessionId, resume: false}, request());
       await this.client.experimental.session.wait({sessionID: a.sessionId}, request());
       const [s, active, remaining] = await Promise.all([
         this.client.session.get({sessionID: a.sessionId}, request()), this.client.session.active(request()),
         this.client.session.inbox.list({sessionID: a.sessionId}, request()),
       ]);
-      return !active[a.sessionId] && !remaining.length && (s.time.busy ?? 0) <= (s.time.idle ?? 0);
+      const inactive = !active[a.sessionId] && !remaining.length && (s.time.busy ?? 0) <= (s.time.idle ?? 0);
+      if (!inactive && inboxError) throw inboxError;
+      return inactive;
     } catch (e) { if (isMissing(e)) return true; throw new Error(`Cannot confirm worker interruption: ${errorMessage(e)}`); }
   }
 }

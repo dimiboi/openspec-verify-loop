@@ -21,6 +21,8 @@ const bbSkill = await readFile('skills/openspec-verify-loop/SKILL.md', 'utf8');
 assert.match(bbSkill, frontmatter);
 assert.match(bbSkill, /bb workflows run --script/);
 assert.match(bbSkill, /`auto` or `full`/);
+assert.match(bbSkill, /verify workflow must\s+be installed and stop/);
+assert.match(bbSkill, /If the command fails, report its error and stop\. Do not retry it/);
 for (const text of ['--store', '--max-rounds', 'bb workflows status', 'bb workflows stop']) assert(bbSkill.includes(text), `bb skill must mention ${text}`);
 const openCodeSkill = await readFile('opencode/SKILL.md', 'utf8');
 assert.match(openCodeSkill, frontmatter);

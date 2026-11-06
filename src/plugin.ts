@@ -3,11 +3,13 @@ import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { configSchema } from './config.js';
 import { registerCommands } from './commands.js';
-import { RunManager } from './manager.js';
+import { RunManager, type RunRegistry } from './manager.js';
 import { LoopService } from './service.js';
 import { registerTool } from './tools.js';
 import { MANAGEMENT_TOOL } from './workers.js';
 import { OPENCODE_VERSION } from './util.js';
+
+const registry: RunRegistry = {owners: new Map(), pending: new Map()};
 
 export const PLUGIN_ID = 'openspec.verify-loop';
 
@@ -28,19 +30,19 @@ export async function protectContext(ctx: Plugin.Context, event: Parameters<Para
   }
 }
 
-export async function setupPlugin(ctx: Plugin.Context) {
+export async function setupPlugin(ctx: Plugin.Context, connect?: ConstructorParameters<typeof LoopService>[2]) {
   if (ctx.app.version !== OPENCODE_VERSION) throw new Error(`openspec-verify-loop requires OpenCode ${OPENCODE_VERSION}`);
   configSchema.parse(ctx.options);
   let unloading = false;
   const notice = async (sessionId: string, result: unknown) => {
-    if (unloading) return;
+    if (unloading) throw new Error('Plugin is unloading; retry result delivery from a loaded instance');
     await ctx.session.synthetic({sessionID: sessionId,
       text: `OpenSpec verification loop result (report only; no action requested):\n${JSON.stringify(result)}`,
       description: 'OpenSpec verification loop', metadata: {openspecLoopNotice: true},
       delivery: 'queue', resume: true});
   };
-  const manager = new RunManager(notice);
-  const service = new LoopService(ctx, manager);
+  const manager = new RunManager(notice, registry);
+  const service = new LoopService(ctx, manager, connect);
   const registrations: {dispose(): Promise<void>}[] = [];
   try {
     registrations.push(await ctx.session.hook('context', event => protectContext(ctx, event)));
@@ -62,8 +64,15 @@ export async function setupPlugin(ctx: Plugin.Context) {
   let cleanup: Promise<void> | undefined;
   return () => cleanup ??= (async () => {
     unloading = true;
-    await manager.close();
-    await Promise.all(registrations.reverse().map(registration => registration.dispose()));
+    try {
+      await manager.close();
+      await Promise.all([...registrations].reverse().map(registration => registration.dispose()));
+    } catch (error) {
+      unloading = false;
+      await manager.reportRetainedFailures();
+      cleanup = undefined;
+      throw error;
+    }
   })();
 }
 

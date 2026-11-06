@@ -6,7 +6,11 @@ export const meta = {
 
 const input = args || {};
 let change = input.change || null;
-const max = Math.min(input.maxRounds || 5, Math.floor((budget().maxAgentCalls + 1) / 2));
+const limit = input.maxRounds === undefined ? 5 : input.maxRounds;
+if (typeof limit !== "number" || limit <= 0 || limit % 1 !== 0) {
+  throw new Error("maxRounds must be a positive integer");
+}
+const max = Math.min(limit, Math.floor((budget().maxAgentCalls + 1) / 2));
 
 const rules = [
   "Rules:",
@@ -62,6 +66,7 @@ function blockedReason(text) {
 }
 const VERDICTS = ["VERDICT: CLEAN", "VERDICT: UNVERIFIED", "VERDICT: ISSUES"];
 const nonzeroCount = /\b[1-9]\d*\s+(critical|warning|suggestion)/i;
+const hasCount = (text) => nonzeroCount.test(text.replace(/[`*_]/g, ""));
 // A check is marked Not verified at a line start, in a table cell or after a colon, not when the words are quoted mid-sentence.
 const markedNotVerified = /(^|\||:)[\s#>*_`\-\d.]*not verified\b/im;
 // Double-quoted text cites a mark rather than making one, as when a report quotes a test fixture.
@@ -76,9 +81,9 @@ function gaps(report) {
   const heads = [...text.matchAll(/^[#>*_\s]*Final Assessment\b/gim)];
   if (heads.length) {
     const assessment = text.slice(heads[heads.length - 1].index);
-    return { count: nonzeroCount.test(assessment), notVerified: /not verified/i.test(assessment) };
+    return { count: hasCount(assessment), notVerified: /not verified/i.test(assessment) };
   }
-  return { count: nonzeroCount.test(text), notVerified: markedNotVerified.test(unquoted(text)) };
+  return { count: hasCount(text), notVerified: markedNotVerified.test(unquoted(text)) };
 }
 function isClean(report) {
   const found = gaps(report);

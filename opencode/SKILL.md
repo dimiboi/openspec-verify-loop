@@ -12,6 +12,9 @@ them all. Workers use this turn's model and variant.
 - Start: `{ "action": "run" }`, optionally with `"change": "name"`,
   `"store": "id"` and `"maxRounds": n` (default 5).
 - Stop: `{ "action": "stop" }` interrupts the active worker and ends the run.
+- Recover a missing result: `{ "action": "report" }` retrieves this checkout's
+  undelivered results and retries their notices, returning delivery status for each.
+  Pending results are held in memory independently of checkout reservations.
 
 Pass a change the user named, or one clearly identified in the conversation.
 Otherwise omit `change`; the first verifier selects the only active change, and
@@ -27,7 +30,20 @@ issues and verified every check. `unverified` means it found no issues but left
 checks Not verified; whether to archive is the user's call.
 
 If a worker waits for a permission or question, the run ends `blocked` and names
-the worker session. Do not approve requests on its behalf.
+the worker session when interruption succeeds. Do not approve requests on its behalf.
+
+If cleanup cannot confirm that the worker stopped, the outcome is `failed` and
+names the worker; the checkout remains reserved. Report that failure and the
+worker session. When the user asks to retry cleanup, call `{"action":"stop"}`
+again. There are no automatic retries. A successful retry releases the checkout
+and returns its own reply without replacing the original run's failure notice
+or resubmitting any worker prompt. Do not start another run to clear a reservation.
+
+OpenCode 2.2.5 can remove the plugin even after its unload cleanup rejects.
+If loop controls disappear after a cleanup failure, report that host limitation
+and the worker identity. The user must interrupt that worker through OpenCode's
+native session controls and confirm inactivity before another loop starts;
+reloading the plugin does not confirm cleanup.
 
 Do not commit, archive, sync specs, push, merge, or deploy as part of the loop.
 If the `openspec_verify_loop` tool is absent, report that the plugin must be

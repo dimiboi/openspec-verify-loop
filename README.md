@@ -127,10 +127,11 @@ prebuilt `dist/index.js`, so installation runs no build.
 ```text
 /opsx-verify-loop [change]
 /opsx-verify-loop-stop
+/opsx-verify-loop-report
 ```
 
 The bundled `openspec-verify-loop` skill calls the `openspec_verify_loop` tool
-with action `run` (optional `change`, `store` and `maxRounds`) or `stop`.
+with action `run` (optional `change`, `store` and `maxRounds`), `stop`, or `report`.
 
 `run` returns `started` with the run ID and worker model at once, and the loop
 continues in the background. One run per checkout is allowed. Workers use the
@@ -140,19 +141,48 @@ identified or is unavailable, the run does not start; no other model is
 substituted. The project must advertise exactly one `openspec-verify-change`
 skill.
 
-Each worker is a new session in the checkout on the plugin's own OpenCode
+Workers and project skill/model discovery use the invoking session's directory,
+so a nested project such as `packages/app` keeps its own OpenSpec root. Sessions
+in sibling directories or symlink aliases still share one reservation for the
+canonical Git checkout across loaded plugin instances; a stop from any of them
+cleans the original worker. Each instance unloads only the runs it owns.
+
+Each worker is a new session in that project directory on the plugin's own OpenCode
 server. Verifiers cannot use the edit tool; no worker can use subagents or the
 loop tool. Shell commands follow the project's permissions. A worker prompt is
 submitted at most once: an uncertain submission is reconciled by its input ID,
 and the run fails if the prompt is not found. If a worker waits for a permission
 or a question, the run ends `blocked`, names the worker session and interrupts
-it.
+it when interruption can be confirmed.
 
 When the run ends, the starting session receives one notice with the result or
 failure; the turn that reports it has no tools. `/opsx-verify-loop-stop` interrupts
 the active worker and ends the run as `stopped`. Unloading the plugin interrupts
 the active worker too. A run does not survive an OpenCode restart; start it
 again.
+
+If result delivery fails, the plugin logs the error and run ID and retains the
+undelivered result separately from checkout reservations. Use
+`/opsx-verify-loop-report` or `{"action":"report"}` to retrieve all pending
+results for this checkout and retry their notices to the original sessions.
+The reply includes each result and whether delivery succeeded. A loaded plugin
+instance can recover another instance's pending results after it unloads.
+These results are held in memory and do not survive a server restart or a full
+plugin module reload. Successfully delivered results leave the pending list.
+
+If cleanup cannot confirm that a worker stopped, the result is `failed` and
+names that worker. The checkout stays reserved, so another loop cannot start
+while it might still be editing. Run `/opsx-verify-loop-stop` again (or call
+the tool with `{"action":"stop"}`) to retry cleanup. There are no automatic
+cleanup retries, and a cleanup retry never resubmits the worker prompt. A
+successful retry releases the checkout and replies to the stopping session;
+it does not replace the failed run's final notice.
+
+The plugin rejects unload if it cannot confirm interruption. OpenCode 2.2.5
+can still remove the plugin and its stop command after that rejection. If this
+happens, use OpenCode's native session controls to interrupt the named worker
+and confirm it is inactive before starting another loop. See
+[the recorded host limitation](docs/known-issues.md#plugin-unload-discards-controls-after-cleanup-rejects).
 
 ### Configure
 
