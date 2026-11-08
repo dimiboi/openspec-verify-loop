@@ -20,6 +20,8 @@
     "bundle": "node scripts/bundle.mjs",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test tests/*.test.ts",
+    "test:live:bb": "tsx tests/live/bb.ts",
+    "test:live:opencode": "tsx tests/live/opencode.ts",
     "check": "npm run typecheck && npm run bundle && npm test && node scripts/validate-plugin.mjs"
   },
   "dependencies": {

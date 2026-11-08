@@ -87,6 +87,54 @@ session or bb workflow is started.
   `bb/server.ts`, both skills and the loop script without starting child npm.
   The validator checks the bb manifest and both skill texts.
 
+## Live fixture and independent checks
+
+The opt-in live harness uses `tests/live/fixtures/greeting/`. It contains a
+small ES module and an active `add-greeting` change, with wrong greeting
+punctuation, no default greeting, and a failing `node --test` check. Task
+markers claim the feature is complete, so verification must inspect behavior.
+The optional `design.md` is intentionally absent.
+
+Each attempt copies the seed into a fresh Git checkout outside this plugin's
+source tree. Supply the installed `openspec-verify-change/SKILL.md`; the harness
+copies that procedure's directory and relative resources into one fixture skill
+location and records its original path and content hashes. It uses the actual
+installed procedure rather than a replacement verifier. The seed stays unchanged
+for the next attempt.
+
+The controller independently checks `greet('Ada')`, `greet('')` and `greet()`
+against the original requirements, runs the fixture tests, and confirms that
+`design.md` remains absent. Its assertions, collected evidence and any plugin
+snapshot live outside the worker's checkout. Editing fixture tests cannot
+change those expectations. These directories do not constitute a filesystem
+sandbox: workers retain the selected host's filesystem permissions.
+
+### Attempt lifecycle and evidence
+
+Live commands take finite `--timeout` and `--cleanup-timeout` values in seconds
+(defaults: 3600 and 60). Each invocation makes one attempt. A lost start response
+is observed through its known origin rather than retried. A model that ends
+`blocked`, `unverified` or `limit` has not passed fix-to-clean; those results are
+kept separately from setup, observation and assertion failures. A stop racing
+with natural completion is `not_exercised` and exits nonzero.
+
+The printed attempt directory contains `fixture/`, OpenCode's `plugin/`
+snapshot when applicable, and `evidence/`. `result.json` records settings,
+source/procedure hashes, host versions, run and worker identities, terminal
+results, individual assertions and cleanup state. `summary.md` links that
+result; adjacent JSONL files retain complete collected native records. Missing
+or bounded-out evidence is explicit. Authentication headers and credentials are
+excluded from recorded host metadata.
+
+Timeout, errors and catchable SIGINT/SIGTERM enter bounded cleanup. Public stop
+controls are preferred; emergency native interruption is recorded separately
+and cannot pass the normal stop scenario. Exit zero requires both a scenario
+pass and confirmed inactivity. Files, projects, threads and native sessions
+remain available for inspection and later manual removal. If cleanup is
+unconfirmed, use the reported native worker identities to stop them and confirm
+inactivity before removing their fixture. SIGKILL or a host crash can require
+the same manual recovery.
+
 ## Manual checks
 
 The automated suite does not show that host loading, notices or model behaviour
@@ -94,7 +142,64 @@ work. Use an isolated Git project with an active OpenSpec change that has known
 issues, and the project's `openspec-verify-change` skill. Read
 [known upstream issues](known-issues.md) first: several entries change how a
 manual run has to be set up, such as how to start the skill on an ACP provider
-and how to prepare a new OpenCode fixture.
+and waiting for a new OpenCode location's catalogue. A global `opencode reload`
+is unnecessary and would affect other loaded locations.
+
+### OpenCode live commands
+
+Run `npm ci` and `npm run check` first, on Node >=22.18. The driver snapshots the
+published plugin resources and resolves production dependencies beside them with
+`npm ci --omit=dev --ignore-scripts`. It connects to an already running OpenCode
+2.2.5 service, configures only its fresh fixture, waits for scoped catalogues,
+and dispatches native commands through the client. It never manages a service
+or reloads unrelated locations. No model or session is started by `--help`.
+
+```sh
+npm run test:live:opencode -- --help
+npm run test:live:opencode -- --scenario fix-to-clean --provider lmstudio --model recursivesi/flint --variant default --procedure "$PWD/.agents/skills/openspec-verify-change/SKILL.md"
+npm run test:live:opencode -- --scenario stop --provider lmstudio --model recursivesi/flint --variant default --procedure "$PWD/.agents/skills/openspec-verify-change/SKILL.md"
+```
+
+Choose an available provider/model explicitly; Flint is an example, not a
+fallback. The supplied procedure must be installed. Each command prints its
+retained evidence summary. Fix-to-clean checks native worker identities/model,
+one start and terminal notice, tool-free reporting and independent greeting
+behavior. Stop waits for an active worker, dispatches the native stop command,
+and checks confirmed inactivity. A completion race is not a stop pass.
+
+The interactive/native-unload and injected-failure recipes below remain separate
+manual diagnostics; the two live scenarios do not establish coverage for them.
+
+### bb live commands
+
+Run `npm ci` and `npm run check` first. Install this checkout explicitly and
+enable Workflows before running either scenario; the harness verifies the
+installation and never changes global plugin configuration:
+
+```sh
+bb plugin install "path:$PWD" --yes
+bb plugin enable workflows
+npm run test:live:bb -- --help
+npm run test:live:bb -- --scenario fix-to-clean --provider claude-code --model claude-sonnet-5-5 --reasoning-level medium --permission-mode auto --procedure "$PWD/.agents/skills/openspec-verify-change/SKILL.md"
+npm run test:live:bb -- --scenario stop --provider claude-code --model claude-sonnet-5-5 --reasoning-level medium --permission-mode auto --procedure "$PWD/.agents/skills/openspec-verify-change/SKILL.md"
+```
+
+Choose an available provider/model explicitly. `auto` or `full` is required;
+ACP providers need `full`; see the README's ACP section. The fixture gets a
+normal thread in its own bb project. Its
+prompt names the installed loop skill, including on ACP where slash text alone
+does not select it. The driver queries workflow status/history in that fixture
+project, checks one launch/preview, inherited worker settings, fresh sequential
+workers and completion without relaunch. The stop scenario sends a normal user
+stop request to the starting thread and checks its stop command and cancellation.
+Direct workflow/thread stops are labeled emergency cleanup.
+
+The live launch establishes that the starting thread can use the skill. Worker
+skill hiding stays covered by `tests/bb-server.test.ts`. The driver does not
+record live skill catalogues or use `bb thread commands` as a catalogue: that
+command does not list bb plugin skills. The retained project, threads and
+fixture can be inspected using the IDs in `result.json`; remove them manually
+after reviewing the evidence and confirming cleanup.
 
 ### Workflow validation (bb CLI)
 
@@ -125,10 +230,10 @@ restrictions seen so far; bb's validator is the authority.
    `acp-opencode` provider, picking the skill from the `/` menu or naming it in
    the prompt (see the README's ACP section). Confirm that workers
    run on Flint and the run reaches a verdict.
-7. During a run, compare the staged catalogs in
-   `~/.bb/runtime/global-skills/*/catalog.json` that the run created. Confirm
-   that worker catalogs (those without the `workflows` skill) do not list
-   `openspec-verify-loop`, and that a new user thread still lists it.
+7. Keep worker skill hiding covered by `tests/bb-server.test.ts`: Workflows
+   workers get no loop skill from the server entry. The live skill launch
+   establishes the starting thread's access. Do not infer plugin skill
+   visibility from `bb thread commands` or record live catalogue observations.
 
 ### OpenCode 2.2.5
 
@@ -164,6 +269,51 @@ restrictions seen so far; bb's validator is the authority.
    the OpenCode service for this check.
 
 ## Recorded results
+
+### bb live harness (2026-11-07)
+
+The bb checks used bb 0.49.0, `claude-code` / `claude-sonnet-5-5`, medium
+reasoning and `auto` permission mode, against the working tree based on
+`e05d3d5`. The production loop script and plugin bundle were unchanged.
+
+| Scenario | Run | Outcome |
+| --- | --- | --- |
+| Stop | `wfr_68a16514-a368-4395-b225-d7319e02c0d4` | Passed: one skill launch and matching preview, active verifier cancelled through the starting thread's stop command, no subsequent worker, inherited settings and confirmed cleanup without fallback. The selected temporary procedure copy matched the supplied procedure's content. |
+| Fix-to-clean | `wfr_f728fe1a-efde-40e5-a51c-8a1f337a40e6` | Failed scenario despite a clean loop after 2 verifications: the origin's preview omitted a hyphen in the run ID (`wfr_f728fe1a-efde-40e5-a51c8a1f337a40e6`). All independent greeting checks and fixture tests passed, no design was created, workers were fresh/sequential with inherited settings, and cleanup was confirmed without fallback. The mismatched preview was not accepted or retried. |
+
+Earlier repair attempts `wfr_47b245fa-3464-4b37-ac77-6bae4c89b03a` and
+`wfr_707071a9-04cf-499f-a1e7-8070fef3a97c` returned `blocked` because a verifier
+wrote an extra footer after `VERDICT: CLEAN`. Their fixtures were repaired, but
+those attempts remain failed. The harness preserves the loop's actual result;
+it does not reinterpret a clean-looking report as a clean terminal result.
+
+Development attempts also exposed asynchronous environment attachment after
+thread creation and shell command substitution removing trailing LF bytes from
+the script. The driver now retains the origin identity before waiting for its
+environment, accepts that documented script transport difference, and captures
+the selected procedure's hashes before temporary copies disappear. Initial
+attempts remain failed, with separate controller-recovery records confirming
+their runs and threads were stopped. These cases and malformed previews are
+covered by deterministic fake-CLI tests. No live skill catalogue is recorded.
+
+### Live harness development (2026-11-06)
+
+Native OpenCode checks used the existing 2.2.5 service (PID 84809), local
+`lmstudio/recursivesi/flint#default`, and isolated package snapshots of the
+working tree based on `e05d3d5`. The production loop and plugin bundle were
+unchanged. Each attempt retained its fixture and machine-readable evidence.
+
+| Scenario | Run | Outcome |
+| --- | --- | --- |
+| Initial fix-to-clean attempt | `run_1a1b21c67c3164b987ae5cb4b2383205db111bf945a` | Failed attempt: interrupted during harness development; cleanup confirmed inactivity, with native fallback for reporting. No repair pass claimed. |
+| Initial stop attempt | `run_1a1b21d2cfbe6adb5103cff4c1b8a2d7ba218bb8f94` | The active verifier stopped, but the watcher did not recognize a reporting boundary without an intervening idle record. The driver was interrupted and cleanup confirmed; this attempt remains failed. |
+| Stop after watcher correction | `run_1a1b2206d3924b3c01834f84a48b97873f8655c2106` | Passed: active verifier interrupted; one start and one stopped notice; both reporting responses used no tools; no subsequent worker; origin and worker confirmed inactive without native fallback. |
+| Fix-to-clean after watcher correction | `run_1a1b2206fce07748e6277c345f3b1c20c116a47ebfb` | Passed: fresh verifier, fixer and fresh verifier on Flint; clean after 2 verifications; external named/empty/missing greeting assertions and fixture tests passed; no design created; reporting used no tools; cleanup confirmed without fallback. |
+
+The observed reporting sequence can be `synthetic`, completed assistant reply,
+next `synthetic`, completed assistant reply, `idle`. The deterministic driver
+tests now cover that sequence. A queued notice does not require an idle record
+between reporting responses.
 
 ### Hardening checks (2026-11-04)
 

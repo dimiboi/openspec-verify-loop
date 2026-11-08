@@ -50,4 +50,5 @@ test('Git packaging ships the prebuilt plugin without invoking child npm', {skip
   for (const path of ['dist/index.js', 'bb/server.ts', 'skills/openspec-verify-loop/SKILL.md',
     'skills/openspec-verify-loop/verify-loop.js', 'opencode/SKILL.md']) assert(files.includes(`package/${path}`), path);
   assert(!files.some(path => path.includes('node_modules/')));
+  assert(!files.some(path => path.includes('tests/live/')));
 });

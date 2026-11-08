@@ -241,6 +241,11 @@ test('without a change, the verifier is told to block and list the active change
   assert.match(calls[0]!.prompt, /if several changes are active, end with `VERDICT: BLOCKED` and list them/);
 });
 
+test('the verifier is told nothing may follow the verdict line', async () => {
+  const {calls} = await run([CLEAN]);
+  assert.match(calls[0]!.prompt, /Nothing may follow the verdict line/);
+});
+
 test('a report without a title blocks before any fixer when no change is given', async () => {
   const {result, roles} = await run(['| Critical | 1 |\nVERDICT: ISSUES'], {});
   assert.deepEqual(roles, ['Verify']);

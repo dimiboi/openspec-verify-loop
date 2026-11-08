@@ -206,5 +206,9 @@ script as a Git preparation trigger.
 
 See [verification and manual testing](docs/verification.md) for the manual
 checks on each host.
+Opt-in `npm run test:live:bb -- --help` and
+`npm run test:live:opencode -- --help` describe the repeatable host fixture
+checks. These commands consume model resources only when explicitly
+invoked with a scenario and model; they are separate from `npm run check`.
 [Known upstream issues](docs/known-issues.md) lists the bb, OpenCode and OpenSpec
 bugs that shape the plugin, where each is tracked, and its workaround.
