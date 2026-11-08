@@ -93,8 +93,8 @@ The automated suite does not show that host loading, notices or model behaviour
 work. Use an isolated Git project with an active OpenSpec change that has known
 issues, and the project's `openspec-verify-change` skill. Read
 [known upstream issues](known-issues.md) first: several entries change how a
-manual run has to be set up, such as the custom ACP profile local Flint needs on
-bb and the `opencode reload` a new OpenCode folder needs.
+manual run has to be set up, such as how to start the skill on an ACP provider
+and how to prepare a new OpenCode fixture.
 
 ### Workflow validation (bb CLI)
 
@@ -121,9 +121,9 @@ restrictions seen so far; bb's validator is the authority.
    and starts no new workflow.
 5. Start a second run, ask the thread to stop it, and confirm it runs
    `bb workflows stop <runId>` and reports the stopped status.
-6. Repeat step 2 from a local Flint thread in `full` mode on the
-   `acp-opencode-default-compat` profile (see the README's ACP section), picking
-   the skill from the `/` menu or naming it in the prompt. Confirm that workers
+6. Repeat step 2 from a local Flint thread in `full` mode on the built-in
+   `acp-opencode` provider, picking the skill from the `/` menu or naming it in
+   the prompt (see the README's ACP section). Confirm that workers
    run on Flint and the run reaches a verdict.
 7. During a run, compare the staged catalogs in
    `~/.bb/runtime/global-skills/*/catalog.json` that the run created. Confirm
@@ -266,6 +266,8 @@ the names the runs used; the renamed-commands row checks the new names.
 | OpenCode, renamed commands (task 2.8) | 2026-11-03 | OpenCode 2.2.5, plugin loaded from the checkout path | this change, renamed commands | `opencode reload`; `/opsx-verify-loop-stop` with no run; `/opsx-verify-loop` from a worker session | only `opsx-verify-loop` and `opsx-verify-loop-stop` registered; stop returned `not_running`; the worker's start returned `blocked`; no worker session created |
 | bb, `unverified` stop (task 1.8) | 2026-11-03 | bb 0.48.1, `claude-opus-5-5`, medium, `auto`, worktree | this change, with the `unverified` status, applied as an uncommitted patch on `d6fecf2` | `wfr_5785aa5d-a6a4-49ef-a8f3-c1672af8a164` on a throwaway change `add-greeting-check` with no `design.md` and one failing test | `unverified` after 2 verifications: verifier 1 found 2 warnings, fixer 1 fixed only the code and created no `design.md`, verifier 2 found no issues with Design Adherence Not verified and ended `VERDICT: UNVERIFIED`; the change was deleted afterwards |
 | bb, narrowed staleness rule (task 1.9) | 2026-11-03 | same | same | `wfr_008002d5-9f5c-4300-bd73-9c9c48229d91` on `unified-verify-loop-mvp` | `clean` after 1 verification, no fixer; the verifier accepted every recorded host run above as verified because the later changes do not alter the behaviour those runs exercised |
+| bb#6871 fix, catalogue (no custom profile) | 2026-11-08 | bb 0.49.0, built-in `acp-opencode`, OpenCode 2.2.5, `customAgents` unset | n/a | `bb provider models acp-opencode --project <id> --selected-model lmstudio/recursivesi/flint --json`, 7 rounds 70 s apart in 4 projects, then once in a fresh worktree | Flint `known`, `[medium, default]` in 29 of 29 reads (0.48.1: `[]` in most); Bonsai `known`, `[]` |
+| bb#6792 fix, Workflows (no custom profile) | 2026-11-08 | bb 0.49.0, built-in `acp-opencode`, `lmstudio/recursivesi/flint`, medium, `full`, worktree sub-thread `thr_73ydnfk84p` | n/a | `wfr_d21aacd5-a604-4569-b4f9-d6056571dd5b` (inherited `agent()`), `wfr_e65a65bd-7767-49d9-b4f6-cd427f845bd1` (Flint at `medium`), `wfr_84dca662-cd8f-478e-bd77-6e98092767bc` (Bonsai, empty list, at `medium`) | all three validate; both Flint runs succeed with the exact reply; the Bonsai selection is accepted and its worker dispatched, then LM Studio refuses the prompt as longer than Bonsai's loaded context length |
 
 The Git install in task 4.5 was waived until the branch is pushed; the plugin was
 loaded from the checkout path instead.

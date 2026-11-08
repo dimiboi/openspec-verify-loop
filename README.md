@@ -76,29 +76,12 @@ result from the workflow's completion notice and starts no new run. To stop a
 run, ask the thread to stop it; it runs `bb workflows stop <runId>`. The
 Workflows preview and history keep every round's report.
 
-### ACP providers and local Flint
+### ACP providers
 
 On ACP providers such as OpenCode, typing `/openspec-verify-loop` as plain text
 does not start the skill: OpenCode does not know bb's plugin skills, so the
 agent only sees the text. Pick the skill from bb's `/` menu, or name it in the
 prompt, for example "Use the openspec-verify-loop skill on change add-export".
-
-The built-in `acp-opencode` provider can record local Flint with no reasoning
-levels, and Workflows then refuses to start its workers. bb's model discovery
-stores another model's reasoning options under Flint when OpenCode answers a
-model switch late (anomalyco/opencode#60316, get-bb/bb#6871), and Workflows
-rejects models with an empty list (get-bb/bb#6792). Both are fixed upstream but
-not in a release yet (bb 0.48.1). Until one ships, start Flint loops from a
-custom ACP profile whose `nativeReasoning` setting fills in `medium`:
-
-```sh
-bb plugin config provider-acp set customAgents '[{"id":"opencode-default-compat","displayName":"OpenCode (default compatibility)","command":"opencode","args":["acp"],"dialect":"opencode","supportsManualCompaction":true,"providerUsage":true,"nativeSkillRoots":{"user":[".claude/skills",".agents/skills"],"project":[".opencode/skills",".claude/skills",".agents/skills"]},"nativeReasoning":{"configId":"effort","supportedLevels":["medium"],"defaultLevel":"medium","levelValues":{"medium":"default"}}}]'
-```
-
-This replaces any existing `customAgents` value, so merge entries you already
-have. The profile appears as provider `acp-opencode-default-compat`; start a
-Flint thread on it in `full` mode, at medium reasoning. Custom profiles cannot
-fork threads. See [known upstream issues](docs/known-issues.md) for the details.
 
 ## OpenCode
 

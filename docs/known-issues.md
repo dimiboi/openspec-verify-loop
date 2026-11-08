@@ -32,34 +32,6 @@ workaround is gone.
 - **Mitigation:** the hidden skill and the prompt rule. Impersonation stays
   open; see C41 in [future improvements](future-improvements.md).
 
-### Workflows rejects models with an empty reasoning list
-
-- **What happens:** Workflows refuses a worker whose model's catalogue entry has
-  `reasoningDiscovery: "known"` and no reasoning levels, both for an explicit
-  `reasoningLevel` and for a worker inheriting the thread's level. Reproduced
-  for the explicit case: `Unsupported reasoning level for literal workflow
-  selection acp-opencode/lmstudio/recursivesi/flint/medium`.
-- **Tracked:** get-bb/bb#6792, fixed by get-bb/bb#6793 (merged 2026-11-03,
-  after the latest release, bb 0.48.1).
-- **Why the list is empty:** see the next entry.
-- **Workaround:** until a bb release ships the fix, start Flint loops from a
-  custom ACP profile whose `nativeReasoning` fills in `medium` (README, "ACP
-  providers and local Flint").
-
-### ACP model discovery stores another model's reasoning options
-
-- **What happens:** bb discovers each model's reasoning options by switching the
-  ACP session through every model. It records each reply against the model it
-  asked for without checking the reply's `currentValue`. When OpenCode answers a
-  switch late (next section), local Flint is recorded with the options of the
-  model probed before it, `bonsai-27b`, which has none. In probes in catalogue
-  order this happened in 9 of 12 runs. Each environment keeps its last result,
-  so Flint's list flips between `[]` and `medium, default`.
-- **Tracked:** get-bb/bb#6871, fixed by get-bb/bb#6874 (merged 2026-11-03,
-  after bb 0.48.1). The agent-side cause, anomalyco/opencode#60316, is open.
-- **Workaround:** the same custom ACP profile as above, until a bb release
-  ships the fix.
-
 ### Workflow status and history are scoped to the run's project
 
 `bb workflows status` and `bb workflows history` report `Unknown workflow run`
@@ -114,19 +86,12 @@ repository has to be installed with `path:`.
   uncertain submission is reconciled by its input ID, and the run fails if the
   prompt is not found (`src/opencode.ts`, AGENTS.md).
 
-### Late reply to a model switch
-
-`opencode acp` often answers `session/set_config_option` for a model switch
-before applying it, so the reply describes the previously selected model. This
-is the agent-side cause of the bb discovery entry above. Tracked in
-anomalyco/opencode#60316.
-
 ### bb plugin skills are not OpenCode commands
 
 On ACP providers, typing `/openspec-verify-loop` sends the text to the agent but
 does not load the skill: OpenCode advertises only its own commands, and bb's
 plugin skills live outside OpenCode's skill folders. Pick the skill from bb's
-`/` menu or name it in the prompt (README, "ACP providers and local Flint").
+`/` menu or name it in the prompt (README, "ACP providers").
 
 ### Testing notes
 
