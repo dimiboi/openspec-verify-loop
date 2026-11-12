@@ -7,9 +7,60 @@ npm ci
 npm run check
 ```
 
+Run both with the same npm cache: the same `npm_config_cache`, or both on the
+default. The offline snapshot test installs production dependencies from that
+cache; an `ENOTCACHED` failure in `tests/live-opencode.test.ts` means the caches
+differ.
+
 The suite checks types, builds `dist/index.js`, runs the tests and validates the
-package. Tests use fake host and worker adapters; no model request, OpenCode
-session or bb workflow is started.
+package. Tests use fake host and worker adapters; no model request, real Pi or OpenCode
+session or bb workflow is started. Local subprocess checks verify Pi ownership
+and cancellation; these need permission to inspect process identities with `ps`.
+
+Pi deterministic checks cover invoking settings/auth, explicit role tools,
+fresh conversations, atomic prompt admission and lost outcomes, saved-call
+replay, read-only reporting that writes nothing, recovery compatibility,
+independent owners, process descendants after owner death, stop, shutdown and
+cleanup retry. `tests/durable-readonly.test.ts` checks the installed Pi Durable
+read-only JSONL open without a model: it changes no file over a torn tail and an
+unconfirmed sidecar record, creates no missing directory, and, beside a writer
+subprocess, keeps a held handle at its open state while fresh opens see newer
+commits. Fake
+RPC live-driver cases cover native command dispatch, provenance, independent
+fixture checks, stop races, duplicate admissions and bounded failure cleanup.
+
+## Opt-in Pi checks
+
+Requires Node >=22.19, Pi 1.5.1 on PATH, the installed verify procedure,
+and an explicitly selected available provider/model. The driver uses isolated
+agent state and package resources, so credentials must be available through
+the environment or an explicitly supplied provider extension. It installs no
+global packages and changes no user package settings.
+
+```sh
+npm run test:live:pi -- --scenario fix-to-clean --provider <provider> --model <model> --reasoning-level medium --procedure /absolute/path/to/openspec-verify-change/SKILL.md
+npm run test:live:pi -- --scenario stop --provider <provider> --model <model> --reasoning-level medium --procedure /absolute/path/to/openspec-verify-change/SKILL.md
+npm run test:live:pi -- --scenario resume --provider <provider> --model <model> --reasoning-level medium --procedure /absolute/path/to/openspec-verify-change/SKILL.md
+```
+
+For an installed custom provider, add `--provider-extension /absolute/path/to/provider`.
+Run `--help` for output and deadline options. Each invocation makes exactly one
+attempt in a fresh greeting fixture. A missed active stop or interruption is
+recorded as not exercised, exits nonzero and starts no replacement attempt.
+
+`resume` requires a completed call and a pending call before it kills only its
+owned Pi process. The restarted host first reports without continuing, then
+receives the explicit native resume command. Evidence compares run, worker and
+submission identities and the original call/round budget. Only a clean final
+result with independent greeting checks and confirmed cleanup passes.
+
+Each retained attempt contains `evidence/summary.md`, `result.json`, native RPC
+records, full worker transcripts/settings, the final diff and cleanup outcome.
+`pi-agent/` holds the authoritative Durable store. While the host runs, the
+driver observes run records through a read-only open of that store; it inspects
+worker transcripts only after the host stops and it obtains exclusive ownership. Credentials are redacted from collected
+structured evidence. These commands are outside `npm run check` and are not
+shipped as plugin resources.
 
 - **Loop script** (`tests/loop.test.ts`): the shared script runs through the
   OpenCode loader with a fake `agent()`. Covers clean on round 1, fix then
@@ -147,7 +198,7 @@ is unnecessary and would affect other loaded locations.
 
 ### OpenCode live commands
 
-Run `npm ci` and `npm run check` first, on Node >=22.18. The driver snapshots the
+Run `npm ci` and `npm run check` first, on Node >=22.19. The driver snapshots the
 published plugin resources and resolves production dependencies beside them with
 `npm ci --omit=dev --ignore-scripts`. It connects to an already running OpenCode
 2.2.5 service, configures only its fresh fixture, waits for scoped catalogues,
@@ -421,3 +472,151 @@ the names the runs used; the renamed-commands row checks the new names.
 
 The Git install in task 4.5 was waived until the branch is pushed; the plugin was
 loaded from the checkout path instead.
+
+## Pi Durable implementation checks (2026-11-09)
+
+Pi and Pi Durable 1.5.0, Node 26.13.0, local
+`lmstudio/qwen3.8-27b-uncensored-mlx` with effective thinking `off`, or
+`lmstudio/recursivesi/flint` with thinking `medium` as indicated below. Each attempt
+used an isolated package snapshot, fixture and agent-state directory; the
+source checkout and global package setup were not changed. Snapshot identities
+and full native/worker records are retained in each evidence directory.
+
+| Scenario | Run / evidence | Outcome |
+| --- | --- | --- |
+| Setup with requested medium thinking | `/private/tmp/loop-live-pi-aiGrmm/evidence/summary.md` | Refused before launch: Pi advertises this model as non-reasoning and selected off. No worker was started. |
+| Active-worker stop | `run_1a1bda49da2812b6df4dc8640efa9e6867eb512b627`; `/private/tmp/loop-live-pi-ybXU9K/evidence/summary.md` | Passed: native start and stop, verifier conversation 9, one input admission, inherited model/off setting, confirmed inactivity and cleanup without fallback. No following worker. |
+| Explicit-resume attempt on Qwen | `run_1a1bda7234f83132f6dc02d460b9b1b844e960f9eda`; `/private/tmp/loop-live-pi-CGehfB/evidence/summary.md` | Not exercised: the verifier's second response ended length with zero output tokens. The plugin failed the run without a fixer; cleanup was confirmed. No crash/resume pass is claimed. |
+| Fix-to-clean on Qwen | `run_1a1bda191e641137556949942f78440ced225f47f0c`; `/private/tmp/loop-live-pi-w5PU0E/evidence/summary.md` | Failed: reached the fixer after a complete first verification, but the 900-second deadline expired before a fresh final verification. Native cleanup stopped the run and confirmed both workers inactive. No convergence pass claimed. |
+| Fix-to-clean on Flint | `run_1a1bdb0080d72f27e17ddab43f5ad2ecfb38f91bafd`; `/private/tmp/loop-live-pi-PnwDDw/evidence/summary.md` | Failed before useful verification: LM Studio returned HTTP 400, refusing to load Flint because it required approximately 38.18 GB more memory under current settings. Worker failure and cleanup were confirmed. No model-server settings were changed. |
+| Flint context-switch interruption | `run_1a1bdc74077eb68bf181fdd48839b49c50de4c805bb`; `/private/tmp/loop-live-pi-etUVnd/evidence/summary.md` | Deliberately interrupted during verifier conversation 9 to apply the requested maximum context. Native stop confirmed inactivity and cleanup without fallback. This 65,536-token-context attempt does not establish convergence. |
+| Fix-to-clean on maximum-context Flint | `run_1a1bdcb513a5fe474b289d746ff9fd5bd6cfde439af`; `/private/tmp/loop-live-pi-R2A4OO/evidence/summary.md` | Passed at 262,144-token context: verifier 9, fixer 56, fresh verifier 125; one input each, selected model/medium thinking, sequential workers, clean final verification, independent greeting behavior and fixture tests, optional design still absent, no parent model turn. Every worker inactive; cleanup confirmed without fallback. |
+| Crash and explicit resume on maximum-context Flint | `run_1a1bde206536f114df452f74bb39f221879097b0ce5`; `/private/tmp/loop-live-pi-43OURQ/evidence/summary.md` | Passed at 262,144-token context: completed verifier 9, hard-killed the owned Pi process with fixer 68 pending, restarted and reported without scheduling work, then explicitly resumed. The original run, arguments, round/call budget, completed reply, conversation IDs and submission IDs survived; no repeated worker or input admission. Fresh verifier 143 returned clean. Independent greeting checks and fixture tests passed, optional design remained absent, selected model/medium thinking was retained, no parent model turn occurred, and every worker was inactive after cleanup without fallback. |
+
+The deterministic checks cover recovery after both verification and fix calls,
+reattaching a pending submission, admission failures before/after storage
+commit, completion/stop races, provider auth refresh, snapshot loss, competing
+processes and supervised descendants after owner death. Live interruption and
+convergence outcomes must be read separately from those fake-provider checks.
+
+`npm ci` and `npm run check` passed on Node 26.13.0 with **168 deterministic
+tests**, type checking, all generated bundles and package validation. No real
+models or Pi/OpenCode agent sessions were called by that suite.
+
+The final deterministic run includes native Pi custom-message error handling
+and a delayed-driver completion/stop race. Stop waits for the background
+driver before closing storage, so a late driver error cannot create a cleanup
+warning after ownership has been released.
+
+Native active stop, convergence and crash/explicit-resume are verified live.
+The maximum-context Flint attempts retain the loaded model configuration in
+`lmstudio-models.json`, alongside complete native and worker records. Earlier
+unsuccessful attempts remain recorded separately.
+
+For these final attempts, the user authorized temporarily unloading Qwen and
+loading Flint. Flint ran at its advertised maximum context of 262,144 tokens.
+After both successful attempts and confirmed cleanup, Flint was unloaded and
+the original `qwen3.8-27b-mlx` instance was restored with context 262,144 and
+parallelism 1. The native model API's loaded-instance IDs and configuration
+matched the pre-test snapshot. No model-server restart or guardrail change
+was needed.
+
+### Monitored Pi/Flint dummy-repository run (2026-11-10)
+
+On `41e2920`, `lmstudio/recursivesi/flint` (context 262,144, parallelism 1,
+thinking `medium`) ran `run_1a1c2ab12a08247eed95c434d208dd2456680ef4da0` to
+`clean` after 2 verifications in 22 min 34 s, with every harness check
+passing. The [monitored-run notes](pi-flint-live-2026-11-10.md) record the
+follow-ups: no progress in the native report during a 605-second response,
+tool-call markup leaked into the fixer's reply, very long medium-thinking
+responses, and the deterministic suite's dependence on the default npm cache.
+
+### Monitored Pi/GLM dummy-repository run (2026-11-10)
+
+On `784b45a`, `openrouter/z-ai/glm-5.3-flash` (thinking `high`; the model
+offers no `medium`) ran `run_1a1c2d28e423e5b185b256146f38af5d5d04db8eb55` to
+`clean` after 2 verifications in about 2 minutes, with every harness check
+passing. The [monitored-run notes](pi-glm-live-2026-11-10.md) record the
+follow-ups: the driver cannot use credentials stored by Pi's own login, and a
+thinking-level refusal does not list the levels the model supports.
+
+### Pi report activity on Flint (2026-11-10)
+
+On `47232fc` with the uncommitted `address-flint-run-followups` changes, the
+recorded Flint fix-to-clean command (same LM Studio provider extension, context
+262,144, parallelism 1, thinking `medium`) ran
+`run_1a1c2e9897e1e46481f2979472b891083418cb32a5c` to `clean` after 2
+verifications in about 28 min 42 s, with every harness check passing (verifier
+9, fixer 124, fresh verifier 193). Evidence:
+`$BB_THREAD_STORAGE/flint-pi-activity/` of thread `thr_duh9zvzxq8`, with
+`pi-reports.jsonl` (1,720 snapshot polls) in `loop-live-pi-0DyPnI/evidence/`
+and LM Studio per-response stats in `lmstudio-stream.jsonl`.
+
+**Activity advanced.** The first verifier waited 989 s over 20 LM Studio
+responses. Its final response ran 295 s (9,177 tokens); during it the
+snapshot's `activity.at` moved every 30.0–30.1 s, and its last value was 6 s
+before LM Studio finished the response. The only gap above 40 s (76 s) matches
+a 64 s stretch with no LM Studio response between two shorter ones. The
+snapshot revision stayed 4 for the whole verifier, so activity committed no run
+records. Each later worker started a new activity time, and the final snapshot
+had no `activity`.
+
+### Pi read-only report on Flint (2026-11-10)
+
+On `4f9292c` with the uncommitted `read-pi-store-read-only` changes (Pi, Pi
+Durable and Chord 1.5.1; committed during the run as `7a442ea` and `1f29dad`,
+and the run's plugin snapshot `dist/pi.js` and `package.json` match them byte
+for byte), the recorded Flint fix-to-clean command (same LM Studio provider
+extension, context 262,144, parallelism 1, thinking `medium`) ran
+`run_1a1c43c0dec6e3d81e3578446ea8b67cbd21960e049` to `clean` after 2
+verifications and 1 fix in about 26 min 1 s, with every harness check and
+cleanup step passing (verifier 9, fixer 62, fresh verifier 157). Evidence:
+`$BB_THREAD_STORAGE/flint-pi-readonly/` of thread `thr_iv34xsxftj`, with
+`pi-reports.jsonl` (1,538 read-only polls) in `loop-live-pi-q9JGEg/evidence/`,
+LM Studio per-response stats in `lmstudio-stream.jsonl`, and 0.5 s samples of
+every `store/` file's size and mtime in `store-samples.jsonl`.
+
+**Activity follows the stream.** The first verifier waited 592 s over 8 LM
+Studio responses. Its final response ran 449.5 s (18,564 tokens); during it
+`committed` took 422 distinct values, one per poll, 1.01–1.13 s apart (median
+1.06 s, the poll interval). The first value came 0.9 s after the response began
+and the last was 0.57 s before it finished, against 30.0–30.1 s steps ending 6 s
+early on 1.5.0. The verifier's largest gap (9.0 s) matches the 8.8 s of prompt
+processing before the second response's first token; the next (4.7 s) matches
+the first response's 3.6 s. The revision stayed 4 for the whole verifier.
+
+**Polls only read.** No poll failed. The `not_found` retry is not logged, so a
+retried listing race would not show in the evidence. During the fresh
+verifier's last 50 s prompt processing, with no LM Studio output, 49 polls left
+all 24 `store/` files (665,016 bytes) unchanged in size and nanosecond mtime;
+the first change came with the first output token. Fixer stretches of 11 s and
+9 s, with 11 and 9 polls, were also unchanged.
+
+### Pi resume and rendered report on GLM (2026-11-10)
+
+On `e384d16`, the driver now sends `/opsx-verify-loop-report` once while a
+worker call is pending and checks the rendered activity line against the
+`committed` time of a read-only `readRecords()` taken before and after it.
+`openrouter/z-ai/glm-5.3-flash` (thinking `high`) ran the `resume` scenario as
+`run_1a1c4607d09f840b83596e742ce8a4ad2ee931d7bc4`: verifier 9, then the
+owned Pi process was hard-killed with fixer 46 pending, restarted, reported,
+and explicitly resumed; fresh verifier 81 returned `clean` after 2
+verifications in about 76 s of worker time. Every harness check and cleanup
+step passed: the run, round budget, completed reply and conversation and
+submission IDs survived the restart with no repeated worker or input
+admission, independent greeting checks and fixture tests passed, the optional
+design stayed absent, and no parent model turn occurred. Evidence:
+`$BB_THREAD_STORAGE/glm-pi-resume/loop-live-pi-cYHffA/evidence/` of thread
+`thr_j7erdkb3qz`.
+
+**Rendered report matches the store.** During verifier 9 the report showed
+`Last worker activity: 2026-11-10T07:33:40.328Z (1 s before this report)`;
+the store's `committed` time before and after the report was
+1794296020328.286 ms, the same instant. After the restart, the report showed
+the run as `interrupted` with no activity line, and the store revision did not
+change while the restarted process idled.
+
+**The `not_found` retry stays unlogged.** `tests/durable-readonly.test.ts`
+covers the retry against Durable 1.5.1, an exhausted retry fails the report
+visibly, and the retry goes away once earendil-works/pi#11994 is fixed, so no
+logging is added before a retry is observed to matter.

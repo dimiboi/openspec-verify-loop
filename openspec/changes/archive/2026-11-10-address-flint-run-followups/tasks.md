@@ -1,0 +1,22 @@
+# Tasks
+
+Prerequisite: archive `add-pi-durable-support` first, since it introduces the `pi-integration` capability this change adds to.
+
+## 1. Pending worker activity on Pi (finding 1)
+
+- [x] 1.1 In `src/pi-runtime.ts`, observe the pending call's `LiveDoc` while `agent()` waits for its submission. On attach, set `{run, conversation, at: Date.now()}` and publish it; on each `advance`, move `at` forward and publish it as the optional `activity` field of `report.json` with a 30-second leading-edge throttle, through `void this.publish().catch(() => {})`. In one `finally`, dispose the observer and clear `activity`. Verify with `npm run typecheck`, and that no `PiRecords` commit or revision change comes from activity.
+- [x] 1.2 Make `PiService.report()` in `src/pi-service.ts` return the snapshot's `activity` with the run, and in `src/pi.ts` pass it to `renderRun` only for the matching last call that has neither reply nor failure, rendered as `Last worker activity: <ISO time> (<n> s before this report)`; progress notices stay unchanged. Verify with `npm run bundle` regenerating `dist/pi.js`.
+- [x] 1.3 Add one test in `tests/pi-service.test.ts`, using a second-service `viewer.report(...)` as the existing service test does, and asserting on `renderRun` output: with a fake provider (`tests/pi-fakes.ts`) that streams nothing yet, the pending call already shows the activity line with the waiting-start time. Mock only `Date`, starting at the current time so it does not jump back to epoch 0 (`t.mock.timers.enable({apis: ['Date'], now: Date.now()})`), and advance it past 30 s before the fake streams partial thinking/text events. Then a report shows a time later than the waiting start while the book revision is unchanged, which proves streamed output moves the time past the throttle's leading edge. If mocking `Date` disturbs Pi Durable's own scheduling, drop the streaming step and state in the test that task 1.6 alone covers advancement. After the reply, and after a stop during a call, no line is shown. Storage isolation of reports stays covered by `tests/pi-runtime.test.ts`. Verify with `npm run check`.
+- [x] 1.4 Document the activity line next to the Pi report command in `README.md`, and in `docs/future-improvements.md` note that Pi report activity now covers the progress part of C23 on Pi (C23 stays open for bb and OpenCode). Verify both files mention `/opsx-verify-loop-report` and the 30-second interval.
+- [x] 1.5 In `docs/pi-flint-live-2026-11-10.md`, drop the sentence calling this a second trigger and linking the never-committed `pi-qwen-live-2026-11-09.md`; say instead that this Flint observation is the trigger for the Pi report activity line. Verify no link in `docs/` points to a missing file.
+- [x] 1.6 Live check (manual, uses model resources): repeat the recorded Flint fix-to-clean command with the same LM Studio provider extension. In the `pi-reports` evidence the live driver records on every snapshot poll, verify that during the first verifier's final response `activity.at` advances at intervals of about 30 s or less, cross-checked against the timestamps in `lmstudio-stream.jsonl`. Record the result under the Pi section of `docs/verification.md`; if it does not advance, record the provider behavior in `docs/known-issues.md` instead of adding a fallback.
+
+## 2. Leaked tool-call markup (finding 2)
+
+- [x] 2.1 Add a row to `docs/future-improvements.md` under Loop control, since it changes how a run ends, for stripping model-specific tool-call markup after the verdict in `lastLine`, with trigger "a verifier's reply ends with leaked tool-call markup after its verdict line". Do not change `verify-loop.js`. Verify the row has a new stable ID and the existing unrecognized-verdict scenarios in `openspec/specs/verification-loop/spec.md` still describe the current safe `blocked` outcome.
+
+## 3. npm cache precondition (finding 4)
+
+- [x] 3.1 State in `AGENTS.md`, the README Development section and `docs/verification.md` Automated checks that `npm ci` and `npm run check` must run with the same npm cache (the same `npm_config_cache`, or both on the default), because the offline snapshot test installs production dependencies from that cache; an `ENOTCACHED` failure in `tests/live-opencode.test.ts` means the caches differ. Verify by reading the three passages; documentation only, no suite run needed.
+
+Finding 3 (long medium-thinking responses) needs no task: it is model behavior and the C25 trigger is not met.

@@ -83,6 +83,80 @@ does not start the skill: OpenCode does not know bb's plugin skills, so the
 agent only sees the text. Pick the skill from bb's `/` menu, or name it in the
 prompt, for example "Use the openspec-verify-loop skill on change add-export".
 
+## Pi
+
+Requires **Pi 1.5.1** and Node.js **>=22.19**. The package pins Pi Durable
+and Chord **1.5.1**; host SDK packages stay external. Native live compatibility
+checks are recorded in [verification](docs/verification.md).
+
+Install the package without a build step:
+
+```sh
+pi install git:github.com/dimiboi/openspec-verify-loop
+```
+
+Pi loads its separate extension entry; the bb-specific skill is excluded.
+Installing or loading it starts no run.
+
+```text
+/opsx-verify-loop [change] [--store <id>] [--max-rounds <n>]
+/opsx-verify-loop-report [run-id]
+/opsx-verify-loop-stop [run-id]
+/opsx-verify-loop-resume [run-id]
+```
+
+Start returns a run ID while the work continues in the background. Workers
+retain the starting model, effective thinking level, project directory and
+instructions, including when you later switch models. Authentication is resolved
+again for each request. The project must advertise exactly one
+`openspec-verify-change` skill. Without a change, the first verifier selects it;
+several active changes produce a blocked report.
+
+Each worker is a new Pi Durable conversation. Verifiers receive `read` and
+`bash`; fixers also receive `edit` and `write`. Workers receive no loop or
+delegation tools. The shared prompt forbids checkout edits by verifiers and
+forbids all workers from running loops, delegating or committing. These shell
+rules are instructions, not a filesystem sandbox.
+
+Only one Pi process can drive a loop in a canonical checkout, including sibling
+directories and symlink aliases. An unfinished run blocks another start.
+`report` renders saved progress and complete worker replies without a model
+turn. Omit the run ID to select the unfinished run, or the latest finished run
+for report. Commands refuse IDs from another checkout. While a worker call is
+pending, `/opsx-verify-loop-report` also shows `Last worker activity: <time>
+(<n> s before this report)`: when the run's store last committed, which while a
+call is pending is when that worker last streamed or ran tool output (stored
+within about a second), or when waiting for it began. A time that stops moving
+means nothing has arrived since. It is shown only while the owner runs the call.
+
+Quit, reload or session replacement interrupts owned execution and saves the
+unfinished run. Restarting Pi and viewing a report start no worker. Explicitly
+`resume` to continue the same run: completed worker calls return saved replies,
+and an unfinished call reconnects to its original submission. The original
+round limit is retained. A changed loop/adapter version, verify procedure,
+directory, or unavailable original model/settings/authentication prevents
+resume; reports and stop remain available.
+
+`stop` cancels work permanently, including an interrupted run, and reports
+stopped only after inactivity is confirmed. Stopped and other terminal runs
+cannot be resumed. If cleanup cannot be confirmed, the run retains its
+reservation and names the worker/process receipt; retry stop after resolving
+the failure. A dead Pi process alone does not prove its shell children stopped.
+An uncertain command admission or ownership guard requires explicit manual
+confirmation of inactivity rather than an automatic takeover. Work interrupted
+mid-command can leave partial edits; shell/write/edit tools are not replay-safe.
+
+State is retained in
+`<Pi agent directory>/openspec-verify-loop/<hash-of-canonical-checkout>/`:
+`store/` holds authoritative Durable JSONL data and `commands/` records
+supervised process identities. Reports open the store read-only, afresh each
+time, so they need no ownership and write nothing; every writable open happens
+under exclusive checkout ownership. `cleanup.json` retains
+unconfirmed cleanup information. Records contain project prompts and replies;
+credentials are not saved. Do not remove state or owner records while work may
+still be active. There is no automatic retention cleanup or cross-host lock
+shared with bb/OpenCode.
+
 ## OpenCode
 
 ### Install
@@ -191,12 +265,17 @@ authenticated endpoint, set `OPENCODE_TOKEN` in the server environment.
 
 ## Development
 
-Use Node.js **>=22.18**:
+Use Node.js **>=22.19**:
 
 ```sh
 npm ci
 npm run check
 ```
+
+Run both with the same npm cache: the same `npm_config_cache`, or both on the
+default. The offline snapshot test installs production dependencies from that
+cache, so an `ENOTCACHED` failure in `tests/live-opencode.test.ts` means the
+caches differ.
 
 `check` type-checks, builds `dist/index.js`, runs the deterministic tests and
 validates the package. The tests use fake hosts and workers; they call no model
@@ -210,5 +289,7 @@ Opt-in `npm run test:live:bb -- --help` and
 `npm run test:live:opencode -- --help` describe the repeatable host fixture
 checks. These commands consume model resources only when explicitly
 invoked with a scenario and model; they are separate from `npm run check`.
+`npm run test:live:pi -- --help` adds native Pi fix-to-clean, stop and explicit
+resume checks with isolated Pi state and package configuration.
 [Known upstream issues](docs/known-issues.md) lists the bb, OpenCode and OpenSpec
 bugs that shape the plugin, where each is tracked, and its workaround.

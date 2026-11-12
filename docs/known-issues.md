@@ -1,6 +1,6 @@
 # Known upstream issues
 
-Bugs and behaviours in bb, OpenCode and OpenSpec that shape how this plugin is
+Bugs and behaviours in bb, OpenCode, Pi Durable and OpenSpec that shape how this plugin is
 built or tested. Each entry says what happens, where it is tracked, and what the
 plugin does about it. Remove an entry when the upstream fix ships and the
 workaround is gone.
@@ -19,8 +19,9 @@ workaround is gone.
   earlier hidden workflow worker) and ran `bb workflows validate` and
   `bb workflows list` as that thread. bb accepted both. The commands were
   read-only and nothing was damaged.
-- **Tracked:** get-bb/bb#3708 (open) proposes a per-install secret. That would
-  not stop this case: a worker runs as the same user and can read the secret.
+- **Tracked:** [get-bb/bb#3708](https://github.com/get-bb/bb/issues/3708)
+  (open) proposes a per-install secret. That would not stop this case: a
+  worker runs as the same user and can read the secret.
   Stopping an agent from posing as another thread needs per-thread credentials
   that the server checks against the claimed thread.
 - **Effect on the plugin:** on bb the server entry hides the
@@ -105,6 +106,28 @@ plugin skills live outside OpenCode's skill folders. Pick the skill from bb's
 - `opencode run "/opsx-verify-loop …"` sends the slash text as a prompt, not as a
   command. Native commands can be sent headlessly with the client's
   `session.command({sessionID, name, text})`.
+
+## Pi Durable
+
+### A read-only JSONL open can fail while the writer reclaims a sidecar
+
+- **What happens:** in Pi Durable 1.5.1, `openNodeJsonlStorage(dir, ctx,
+  {readOnly: true})` lists the directory and then stats each entry. When the
+  writer renames a `doc-N.jsonl.reclaim` file over its sidecar in between, the
+  open rejects with `JSONL directory listing failed: ENOENT … lstat …reclaim`
+  (cause code `not_found`). The read-only open retries only corruption errors
+  raised while `main.jsonl` changed, not this one. Nothing is written; the open
+  just fails.
+- **Observed:** `tests/durable-readonly.test.ts` on 2026-11-10, against the
+  installed 1.5.1 with a writer subprocess committing continuously: 7 of 2,709
+  fresh opens failed this way (25 of about 11,700 in a longer run). It also
+  failed a report poll in `tests/pi-service.test.ts` during cleanup.
+- **Workaround:** the Pi report retries an open that fails with a `not_found`
+  cause, up to 5 attempts (`readRecords` in `src/pi-runtime.ts`).
+- **Tracked:** [earendil-works/pi#11994](https://github.com/earendil-works/pi/issues/11994)
+  (auto-closed pending maintainer review), with a two-line fix in
+  `NodeExecutionEnv.listDir` proposed. Drop the retry once a release skips
+  entries that vanish during the listing.
 
 ## OpenSpec
 

@@ -11,7 +11,15 @@ for (const script of ['build', 'prepare', 'prepack', 'preinstall', 'install', 'p
 }
 for (const field of ['name', 'description', 'branding', 'server']) assert(pkg.bb?.[field], `bb manifest needs ${field}`);
 assert.equal(pkg.bb.server, './bb/server.ts');
-for (const path of ['dist/index.js', 'bb/server.ts', 'LICENSE', 'skills/openspec-verify-loop/SKILL.md',
+assert.deepEqual(pkg.pi, {extensions: ['./dist/pi.js'], skills: []});
+assert.equal(pkg.engines.node, '>=22.19.0');
+for (const name of ['@earendil-works/pi-coding-agent', '@earendil-works/pi-ai']) {
+  assert(!pkg.dependencies[name], `${name} is provided by Pi`);
+  assert.equal(pkg.peerDependenciesMeta[name].optional, true);
+}
+const {default: piPlugin} = await import(pathToFileURL(resolve('dist/pi.js')).href);
+assert.equal(typeof piPlugin, 'function');
+for (const path of ['dist/index.js', 'dist/pi.js', 'dist/pi-supervisor.js', 'bb/server.ts', 'LICENSE', 'skills/openspec-verify-loop/SKILL.md',
   'skills/openspec-verify-loop/verify-loop.js', 'opencode/SKILL.md']) assert((await stat(path)).size > 0, path);
 const {default: plugin} = await import(pathToFileURL(resolve(pkg.exports['.'])).href);
 assert.equal(plugin.id, 'openspec.verify-loop');

@@ -9,34 +9,38 @@ import { parseArgs, promisify } from 'node:util';
 
 export const repository = fileURLToPath(new URL('../../', import.meta.url));
 export const change = 'add-greeting';
-export type Host = 'bb' | 'opencode';
+export type Host = 'bb' | 'opencode' | 'pi';
 export type Options = {
-  host: Host; scenario: 'fix-to-clean' | 'stop'; provider: string; model: string;
+  host: Host; scenario: 'fix-to-clean' | 'stop' | 'resume'; provider: string; model: string;
   procedure: string; variant: string; mode?: string; reasoning?: string;
-  timeout: number; cleanupTimeout: number; output: string;
+  timeout: number; cleanupTimeout: number; output: string; providerExtension?: string;
 };
 export const help = (host: Host) => `Live ${host} checks (explicit model calls; one attempt per invocation)
---scenario fix-to-clean|stop --provider ID --model ID --procedure /path/to/SKILL.md
-${host === 'bb' ? '--permission-mode auto|full [--reasoning-level medium]' : '[--variant default]'}
+--scenario fix-to-clean|stop${host === 'pi' ? '|resume' : ''} --provider ID --model ID --procedure /path/to/SKILL.md
+${host === 'bb' ? '--permission-mode auto|full [--reasoning-level medium]' : host === 'pi' ? '[--reasoning-level medium] [--provider-extension /path/to/provider]' : '[--variant default]'}
 [--timeout 3600] [--cleanup-timeout 60] [--output /path/outside/source]
 Timeouts are seconds. Evidence, fixtures and host sessions are retained.
-Install the tested checkout explicitly on bb; OpenCode uses an existing 2.2.5 service.
+${host === 'pi' ? 'Pi uses isolated fixture state; provide credentials in the environment or a provider extension.' : 'Install the tested checkout explicitly on bb; OpenCode uses an existing 2.2.5 service.'}
 `;
 
 export function options(host: Host, args: string[]): Options | undefined {
   const {values} = parseArgs({args, options: {
-    help: {type: 'boolean'}, scenario: {type: 'string'}, provider: {type: 'string'}, model: {type: 'string'},
+    help: {type: 'boolean'}, scenario: {type: 'string'}, provider: {type: 'string'}, model: {type: 'string'}, 'provider-extension': {type: 'string'},
     procedure: {type: 'string'}, variant: {type: 'string'}, 'permission-mode': {type: 'string'},
     'reasoning-level': {type: 'string'}, timeout: {type: 'string'}, 'cleanup-timeout': {type: 'string'}, output: {type: 'string'},
   }});
   if (values.help) return;
-  assert(values.scenario === 'fix-to-clean' || values.scenario === 'stop', '--scenario must be fix-to-clean or stop');
+  assert(values.scenario === 'fix-to-clean' || values.scenario === 'stop' || (host === 'pi' && values.scenario === 'resume'), '--scenario must be fix-to-clean or stop (Pi also supports resume)');
   for (const key of ['provider', 'model', 'procedure'] as const) assert(values[key]?.trim(), `--${key} is required`);
   if (host === 'bb') {
     assert(['auto', 'full'].includes(values['permission-mode'] ?? ''), '--permission-mode must be auto or full');
     if (values.provider!.startsWith('acp-')) assert.equal(values['permission-mode'], 'full', 'ACP requires full mode');
     assert(!values.variant, '--variant is only supported by OpenCode');
+  } else if (host === 'pi') {
+    assert(!values['permission-mode'] && !values.variant, 'Pi does not accept permission-mode or variant');
+    if (values['reasoning-level']) assert(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(values['reasoning-level']), 'Invalid Pi reasoning level');
   } else assert(!values['permission-mode'] && !values['reasoning-level'], 'bb settings cannot be used on OpenCode');
+  if (host !== 'pi') assert(!values['provider-extension'], '--provider-extension is only supported by Pi');
   const seconds = (value: string, name: string) => {
     const n = Number(value);
     assert(Number.isFinite(n) && n > 0 && n * 1000 <= 2 ** 31 - 1, `${name} must be finite positive seconds`);
@@ -45,7 +49,8 @@ export function options(host: Host, args: string[]): Options | undefined {
   return {host, scenario: values.scenario, provider: values.provider!, model: values.model!,
     procedure: resolve(values.procedure!), variant: values.variant ?? 'default', mode: values['permission-mode'],
     reasoning: values['reasoning-level'], timeout: seconds(values.timeout ?? '3600', '--timeout'),
-    cleanupTimeout: seconds(values['cleanup-timeout'] ?? '60', '--cleanup-timeout'), output: resolve(values.output ?? tmpdir())};
+    cleanupTimeout: seconds(values['cleanup-timeout'] ?? '60', '--cleanup-timeout'), output: resolve(values.output ?? tmpdir()),
+    ...(values['provider-extension'] ? {providerExtension: resolve(values['provider-extension'])} : {})};
 }
 
 export type CommandResult = {code: number; stdout: string; stderr: string};
@@ -120,6 +125,7 @@ export class Attempt {
       cleanup: {confirmed: false, fallback: false}, workers: []};
   }
   static async create(options: Options) {
+    await mkdir(options.output, {recursive: true});
     const output = await realpath(options.output);
     assert(!inside(await realpath(repository), output), 'Live output must be outside the plugin source checkout');
     const root = await mkdtemp(join(output, `loop-live-${options.host}-`));

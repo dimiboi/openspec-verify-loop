@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Attempt, options, prepareFixture, independentChecks, hashes, collectPages, lifecycle, notices, type Options } from './live/common.js';
@@ -40,6 +40,12 @@ test('external checks catch weakened tests and optional artifacts independently 
   await writeFile(join(attempt.fixture, 'openspec/changes/add-greeting/design.md'), 'invented design');
   await independentChecks(attempt);
   assert.equal(attempt.result.assertions.at(-1)?.passed, false);
+});
+
+test('an attempt creates a missing output directory', async t => {
+  const {input, root} = await setup(t);
+  const attempt = await Attempt.create({...input, output: join(root, 'missing/nested')});
+  assert(attempt.root.startsWith(join(await realpath(root), 'missing/nested')));
 });
 
 test('options reject missing models, invalid bounds and unsupported permission modes before host mutation', () => {

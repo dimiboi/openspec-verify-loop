@@ -4,7 +4,7 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "Verify and fix an OpenSpec change until clean, as a bb or OpenCode plugin",
+  "description": "Verify and fix an OpenSpec change until clean, as a bb, OpenCode or Pi plugin",
   "bb": {
     "name": "OpenSpec verify loop",
     "description": "Verify an OpenSpec change, fix every finding with fresh workers, and repeat until clean",
@@ -14,7 +14,7 @@
     "server": "./bb/server.ts"
   },
   "engines": {
-    "node": ">=22.18.0"
+    "node": ">=22.19.0"
   },
   "scripts": {
     "bundle": "node scripts/bundle.mjs",
@@ -22,18 +22,22 @@
     "test": "tsx --test tests/*.test.ts",
     "test:live:bb": "tsx tests/live/bb.ts",
     "test:live:opencode": "tsx tests/live/opencode.ts",
-    "check": "npm run typecheck && npm run bundle && npm test && node scripts/validate-plugin.mjs"
+    "check": "npm run typecheck && npm run bundle && npm test && node scripts/validate-plugin.mjs",
+    "test:live:pi": "tsx tests/live/pi.ts"
   },
   "dependencies": {
     "@opencode/client": "2.2.5",
     "@opencode/plugin": "2.2.5",
-    "zod": "4.6.7"
+    "zod": "4.6.7",
+    "@earendil-works/pi-durable": "1.5.1",
+    "@earendil-works/chord": "1.5.1"
   },
   "devDependencies": {
     "@types/node": "26.6.6",
     "esbuild": "0.28.2",
     "tsx": "4.23.15",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "@earendil-works/pi-coding-agent": "1.5.1"
   },
   "exports": {
     ".": "./dist/index.js"
@@ -44,5 +48,23 @@
     "skills/openspec-verify-loop",
     "opencode",
     "LICENSE"
-  ]
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/pi.js"
+    ],
+    "skills": []
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    }
+  }
 }

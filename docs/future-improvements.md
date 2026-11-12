@@ -38,7 +38,7 @@ ID for reference.
 | C09 | bb: page `bb workflows history` into thread storage and link each round's report. OpenCode: one file per round. | Users cannot find an earlier round's report from the preview or the worker sessions. |
 | C16 | Failure context in the result: round, role, error, possible partial edits. | Users cannot tell where a failed run stopped from the host's native error. |
 | C37 | Per-stage progress counts. | Users cannot tell what a failed run did from the round reports and failure context. |
-| C23 | Status of a running loop: native `bb workflows status` on bb, a tool action on OpenCode. | Users need progress beyond the preview and worker sessions. |
+| C23 | Status of a running loop: native `bb workflows status` on bb, a tool action on OpenCode. On Pi, `/opsx-verify-loop-report` already shows the pending worker's last activity, read from the run store's last commit time, which covers the progress part; C23 stays open for bb and OpenCode. | Users need progress beyond the preview and worker sessions. |
 
 ## Loop control
 
@@ -47,6 +47,7 @@ ID for reference.
 | C20 | Stop early when the same issues repeat in consecutive rounds, by comparing normalized issue sections. | Runs regularly spend their remaining rounds on unchanged issues. |
 | C19 | OpenCode: resume after a host restart by saving each `agent()` call before submitting and replaying completed calls, reconciling the pending one without resubmitting. bb already recovers natively. | OpenCode restarts or updates interrupt real runs. |
 | C26 | Crash-safe ownership: checkout lock with tokens, unload fencing, receipts. | A crash leaves an orphaned worker that edits the checkout, or cleanup overwrites a newer run's result. |
+| C42 | Strip model-specific tool-call markup that follows the verdict line before `lastLine` reads it. Until then such a verifier reply ends `blocked` as an unrecognized verdict, never a false `clean`. | A verifier's reply ends with leaked tool-call markup after its verdict line. |
 
 ## Environment and setup
 

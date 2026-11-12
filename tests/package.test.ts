@@ -47,7 +47,7 @@ test('Git packaging ships the prebuilt plugin without invoking child npm', {skip
   await assert.rejects(access(marker), {code: 'ENOENT'});
   const files: string[] = [];
   await tar.t({file: archive, onentry: (entry: {path: string}) => files.push(entry.path)});
-  for (const path of ['dist/index.js', 'bb/server.ts', 'skills/openspec-verify-loop/SKILL.md',
+  for (const path of ['dist/index.js', 'dist/pi.js', 'dist/pi-supervisor.js', 'bb/server.ts', 'skills/openspec-verify-loop/SKILL.md',
     'skills/openspec-verify-loop/verify-loop.js', 'opencode/SKILL.md']) assert(files.includes(`package/${path}`), path);
   assert(!files.some(path => path.includes('node_modules/')));
   assert(!files.some(path => path.includes('tests/live/')));
