@@ -720,6 +720,7 @@ var PiService = class {
   }
   async open(cwd, models) {
     if (this.closing) throw new Error("The Pi extension is shutting down");
+    await this.settle();
     if (this.active) throw new Error(`This Pi session owns run ${this.active.id}; report or stop it first`);
     const location = await this.location(cwd);
     await mkdir4(location.directory, { recursive: true, mode: 448 });
@@ -739,6 +740,11 @@ var PiService = class {
       }
       throw error;
     }
+  }
+  /** The store commits a finished run before its driver releases the checkout; wait for that release. */
+  async settle() {
+    const active = this.active;
+    if (active?.driving && (await this.report(active.id, { cwd: active.checkout })).state === "terminal") await active.driving;
   }
   emit(notice) {
     if (this.closing) return;
@@ -784,6 +790,7 @@ var PiService = class {
   async resume(text, ctx) {
     if (VERSION !== "1.5.1") throw new Error(`Pi loop requires Pi 1.5.1; found ${VERSION}`);
     const id = parseRunId(text);
+    await this.settle();
     if (this.active) throw new Error(`Run ${this.active.id} is already running or awaiting cleanup; use stop`);
     const opened = await this.open(ctx.cwd, createModels3());
     try {

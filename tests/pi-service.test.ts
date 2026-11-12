@@ -182,6 +182,33 @@ test('Pi stop losing the completion race preserves clean and releases checkout o
   assert.equal(report.result?.status, 'clean'); assert.equal(report.cleanup, null);
 });
 
+test('Pi resume, stop and start after a run finishes wait for its owner to release the checkout', async t => {
+  let release = () => {}; let gate = Promise.resolve(); let closing = false;
+  const hold = () => { closing = false; gate = new Promise(resolve => {release = resolve;}); };
+  const f = await setup(t, [CLEAN, CLEAN, pending]);
+  const service = new PiService(f.pi, () => {}, f.stateHome, async options => {
+    const runtime = await PiRuntime.open(options);
+    const close = runtime.close.bind(runtime);
+    runtime.close = async suspend => { closing = true; await gate; await close(suspend); };
+    return runtime;
+  });
+  t.after(async () => { release(); await service.shutdown(); });
+  hold();
+  const run = await service.start('add-export', f.ctx);
+  await until(async () => closing);
+  assert.equal((await service.report(run.id, f.ctx)).state, 'terminal');
+  const resuming = assert.rejects(service.resume(run.id, f.ctx), /terminal and cannot be resumed/);
+  release(); await resuming;
+  await assert.rejects(service.stop(run.id, f.ctx), /already terminal/);
+  hold();
+  const second = await service.start('add-export', f.ctx);
+  await until(async () => closing);
+  const starting = service.start('add-export', f.ctx);
+  release();
+  assert.notEqual((await starting).id, second.id);
+  await service.shutdown();
+});
+
 test('Pi state cannot be placed in the working tree through a symlink alias', async t => {
   const f = await setup(t, []);
   const alias = join(f.stateHome, '..', 'state-alias');

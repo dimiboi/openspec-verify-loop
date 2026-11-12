@@ -1,9 +1,9 @@
 # Known upstream issues
 
-Bugs and behaviours in bb, OpenCode, Pi Durable and OpenSpec that shape how this plugin is
-built or tested. Each entry says what happens, where it is tracked, and what the
-plugin does about it. Remove an entry when the upstream fix ships and the
-workaround is gone.
+Current bugs and behaviours in bb, OpenCode, Pi Durable and OpenSpec that the
+plugin or its users have to work around. Each entry says what happens, where it
+is tracked, and what the workaround is. Remove an entry when the upstream fix
+ships and the workaround is gone.
 
 ## bb
 
@@ -37,17 +37,33 @@ workaround is gone.
 
 `bb workflows status` and `bb workflows history` report `Unknown workflow run`
 when called from a thread in another project. The bb skill reads status from
-the thread that started the run, which is always in the run's project.
+the thread that started the run, which is always in the run's project, and the
+bb live driver calls both as the fixture project's starting thread.
 
-### Git install replaces a committed `dist/`
+### Claude Code skill paths are temporary
 
-bb's documentation says a Git install builds the declared server entry and
-replaces any committed `dist/`, which would drop the OpenCode bundle
-(`dist/index.js`) from a bb install. bb never loads that bundle, so the plugin
-keeps it in `dist/`. Not yet observed: the manual runs installed bb from a local
-path. Check it when the branch is pushed. Related: `bb plugin install git:` does
-not accept a `file://` URL (it is rewritten to `https://file:///…`), so a local
-repository has to be installed with `path:`.
+- **What happens:** bb 0.49.0's Claude Code bridge shows each injected skill
+  through a symlinked plugin inside its own temporary directory
+  (`$TMPDIR/bb-provider-bridge-provider-claude-code-*/skills/…`) and deletes
+  that directory when the bridge process exits. A path read from the origin's
+  skill list can therefore vanish while the workflow's workers still need it.
+  Codex and ACP workers are not affected: their bridge directories hold no
+  skills, and they get paths under `~/.bb/runtime/global-skills`.
+- **Observed:** run `wfr_2d7dff88-f9bf-400a-8014-92aeefb0b03a` (2026-11-12,
+  `claude-code` / `claude-sonnet-5-5`): the origin passed the bridge copy of
+  `openspec-verify-change/SKILL.md`; the final verifier, started 30 s after the
+  origin's launch turn ended, found it missing and loaded the skill through its
+  Skill tool instead.
+- **Workaround:** the bb skill takes the procedure path from
+  `bb skill list --environment "$BB_ENVIRONMENT_ID" --json`, which reports the
+  installed file, and not from its own skill list. The bb live driver fails a
+  run whose supplied procedure is gone at the end.
+- **Tracked:** not reported upstream.
+
+### A Git install cannot point at a local repository
+
+`bb plugin install git:` does not accept a `file://` URL (it is rewritten to
+`https://file:///…`), so a local repository has to be installed with `path:`.
 
 ## OpenCode
 
@@ -71,8 +87,7 @@ repository has to be installed with `path:`.
   while the plugin remains loaded, but a host-forced unload discards that
   instance's controls. Another loaded instance shares the checkout reservation
   and can retry stop; a full module reload loses in-memory ownership. The plugin
-  cannot prevent that host behavior by rejecting its cleanup callback. Normal unload, with confirmed interruption,
-  passed in the same fixture.
+  cannot prevent that host behavior by rejecting its cleanup callback.
 - **Workaround:** if unload fails, use OpenCode's native session controls to
   interrupt the named worker and confirm it is inactive before starting another
   loop. Reinstalling/reloading the plugin does not prove that worker stopped.
@@ -86,26 +101,6 @@ repository has to be installed with `path:`.
 - **Effect on the plugin:** a worker prompt is submitted at most once. An
   uncertain submission is reconciled by its input ID, and the run fails if the
   prompt is not found (`src/opencode.ts`, AGENTS.md).
-
-### bb plugin skills are not OpenCode commands
-
-On ACP providers, typing `/openspec-verify-loop` sends the text to the agent but
-does not load the skill: OpenCode advertises only its own commands, and bb's
-plugin skills live outside OpenCode's skill folders. Pick the skill from bb's
-`/` menu or name it in the prompt (README, "ACP providers").
-
-### Testing notes
-
-- A newly loaded location's first catalogue read can be empty. In the
-  2026-11-04 hardening checks, a fixture configured before its first load
-  advertised its local package plugin and skill after subsequent reads,
-  without a global reload. Supply a local plugin package directory with its
-  manifest, and wait for the advertised plugin/skill before starting a check.
-  `opencode reload` rebuilds every loaded location; do not use it just to refresh
-  an isolated manual fixture.
-- `opencode run "/opsx-verify-loop …"` sends the slash text as a prompt, not as a
-  command. Native commands can be sent headlessly with the client's
-  `session.command({sessionID, name, text})`.
 
 ## Pi Durable
 

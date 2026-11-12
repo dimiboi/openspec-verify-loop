@@ -76,13 +76,6 @@ result from the workflow's completion notice and starts no new run. To stop a
 run, ask the thread to stop it; it runs `bb workflows stop <runId>`. The
 Workflows preview and history keep every round's report.
 
-### ACP providers
-
-On ACP providers such as OpenCode, typing `/openspec-verify-loop` as plain text
-does not start the skill: OpenCode does not know bb's plugin skills, so the
-agent only sees the text. Pick the skill from bb's `/` menu, or name it in the
-prompt, for example "Use the openspec-verify-loop skill on change add-export".
-
 ## Pi
 
 Requires **Pi 1.5.1** and Node.js **>=22.19**. The package pins Pi Durable

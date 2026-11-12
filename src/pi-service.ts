@@ -41,6 +41,7 @@ export class PiService {
 
   private async open(cwd: string, models: Awaited<ReturnType<typeof modelsFor>>) {
     if (this.closing) throw new Error('The Pi extension is shutting down');
+    await this.settle();
     if (this.active) throw new Error(`This Pi session owns run ${this.active.id}; report or stop it first`);
     const location = await this.location(cwd);
     await mkdir(location.directory, {recursive: true, mode: 0o700});
@@ -53,6 +54,12 @@ export class PiService {
       catch (cleanup) {throw new Error(`${errorMessage(error)}; opening cleanup failed: ${errorMessage(cleanup)}. Checkout remains owned.`);}
       throw error;
     }
+  }
+
+  /** The store commits a finished run before its driver releases the checkout; wait for that release. */
+  private async settle(): Promise<void> {
+    const active = this.active;
+    if (active?.driving && (await this.report(active.id, {cwd: active.checkout})).state === 'terminal') await active.driving;
   }
 
   private emit(notice: PiNotice): void {
@@ -91,6 +98,7 @@ export class PiService {
   async resume(text: string, ctx: ExtensionContext): Promise<PiRun> {
     if (VERSION !== '1.5.1') throw new Error(`Pi loop requires Pi 1.5.1; found ${VERSION}`);
     const id = parseRunId(text);
+    await this.settle();
     if (this.active) throw new Error(`Run ${this.active.id} is already running or awaiting cleanup; use stop`);
     const opened = await this.open(ctx.cwd, createModels());
     try {

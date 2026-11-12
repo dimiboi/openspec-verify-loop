@@ -191,10 +191,16 @@ the same manual recovery.
 The automated suite does not show that host loading, notices or model behaviour
 work. Use an isolated Git project with an active OpenSpec change that has known
 issues, and the project's `openspec-verify-change` skill. Read
-[known upstream issues](known-issues.md) first: several entries change how a
-manual run has to be set up, such as how to start the skill on an ACP provider
-and waiting for a new OpenCode location's catalogue. A global `opencode reload`
-is unnecessary and would affect other loaded locations.
+[known upstream issues](known-issues.md) first: some entries change how a
+manual run has to be set up.
+
+On OpenCode, a newly loaded location's first catalogue read can be empty. Supply
+a local plugin package directory with its manifest, and wait until the location
+advertises the plugin and skill before starting a check. A global
+`opencode reload` is unnecessary and would affect other loaded locations.
+`opencode run "/opsx-verify-loop …"` sends the slash text as a prompt, not as a
+command; send native commands headlessly with the client's
+`session.command({sessionID, name, text})`.
 
 ### OpenCode live commands
 
@@ -235,11 +241,15 @@ npm run test:live:bb -- --scenario fix-to-clean --provider claude-code --model c
 npm run test:live:bb -- --scenario stop --provider claude-code --model claude-sonnet-5-5 --reasoning-level medium --permission-mode auto --procedure "$PWD/.agents/skills/openspec-verify-change/SKILL.md"
 ```
 
+To test a published commit instead, install it with
+`bb plugin install "git:github.com/<owner>/openspec-verify-loop@<commit>" --yes`
+from a checkout of that commit. The driver then requires every tested plugin
+file in bb's cached copy to match the checkout and ignores the `dist/server.js`
+bundle bb builds beside them.
+
 Choose an available provider/model explicitly. `auto` or `full` is required;
-ACP providers need `full`; see the README's ACP section. The fixture gets a
-normal thread in its own bb project. Its
-prompt names the installed loop skill, including on ACP where slash text alone
-does not select it. The driver queries workflow status/history in that fixture
+ACP providers need `full`. The fixture gets a normal thread in its own bb
+project. Its prompt names the installed loop skill. The driver queries workflow status/history in that fixture
 project, checks one launch/preview, inherited worker settings, fresh sequential
 workers and completion without relaunch. The stop scenario sends a normal user
 stop request to the starting thread and checks its stop command and cancellation.
@@ -278,9 +288,8 @@ restrictions seen so far; bb's validator is the authority.
 5. Start a second run, ask the thread to stop it, and confirm it runs
    `bb workflows stop <runId>` and reports the stopped status.
 6. Repeat step 2 from a local Flint thread in `full` mode on the built-in
-   `acp-opencode` provider, picking the skill from the `/` menu or naming it in
-   the prompt (see the README's ACP section). Confirm that workers
-   run on Flint and the run reaches a verdict.
+   `acp-opencode` provider. Confirm that workers run on Flint and the run
+   reaches a verdict.
 7. Keep worker skill hiding covered by `tests/bb-server.test.ts`: Workflows
    workers get no loop skill from the server entry. The live skill launch
    establishes the starting thread's access. Do not infer plugin skill
@@ -320,6 +329,36 @@ restrictions seen so far; bb's validator is the authority.
    the OpenCode service for this check.
 
 ## Recorded results
+
+### bb stable procedure path (2026-11-12)
+
+With the skill taking the procedure path from `bb skill list` (commit
+`166d2a0`, installed with `path:`), `fix-to-clean` on `claude-code` /
+`claude-sonnet-5-5`, medium reasoning, `auto`, passed: run
+`wfr_803935ac-620b-4ede-ae48-c8d3c2c3517c` ended `clean` after 2
+verifications, with every harness check passing, including the new
+"Supplied procedure outlives the run". The origin passed the fixture's
+`.bb/skills/openspec-verify-change/SKILL.md`, not a bridge copy, and both
+verifiers read that file. Evidence:
+`/Users/dmitry/.bb/thread-storage/thr_6cyyqpmcge/bb-procedure-path-live/loop-live-bb-tWDPh4/evidence/`.
+
+### bb Git install (2026-11-12)
+
+bb 0.49.0 installed the pushed `main` commit `3abb23f` with
+`bb plugin install "git:github.com/dimiboi/openspec-verify-loop@3abb23f…"`.
+The installed workflow script passed `bb workflows validate`.
+
+`fix-to-clean` on `claude-code` / `claude-sonnet-5-5`, medium reasoning,
+`auto`, against that install passed: run
+`wfr_2d7dff88-f9bf-400a-8014-92aeefb0b03a` ended `clean` after 2
+verifications (workers 21 s, 11 s, 18 s), with every harness check, the
+greeting checks and fixture tests passing, `design.md` still absent and
+cleanup confirmed without fallback. The final verifier found the supplied
+procedure path, a temporary copy under bb's Claude Code provider bridge, no
+longer present and loaded the same `openspec-verify-change` skill through
+its Skill tool instead. Evidence:
+`/Users/dmitry/.bb/thread-storage/thr_7r257yxeg2/bb-git-install-live/loop-live-bb-9ij4Sr/evidence/`.
+The `stop` scenario was not rerun: it does not depend on the install source.
 
 ### bb live harness (2026-11-07)
 

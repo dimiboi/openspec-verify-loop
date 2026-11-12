@@ -31,11 +31,11 @@ Launch at once. Run only the commands in the steps below. Do not inspect the
 change, the repository or `bb` itself, run the verification yourself, or choose
 a change for the user.
 
-1. Find the absolute path of `openspec-verify-change/SKILL.md` in your skill
-   list. If it is not there, run `bb skill list --json` and take the
+1. Run `bb skill list --environment "$BB_ENVIRONMENT_ID" --json` and take the
    `filePath` of a skill named `openspec-verify-change`, preferring one inside
-   this checkout. If none exists, report that the OpenSpec verify workflow must
-   be installed and stop.
+   this checkout. Do not use the path from your own skill list: some providers
+   show a temporary copy that bb deletes while the workflow runs. If none
+   exists, report that the OpenSpec verify workflow must be installed and stop.
 2. Write the arguments as JSON to thread storage. Include `change`, `store` and
    `maxRounds` (a number) only when the user gave them, unchanged:
 

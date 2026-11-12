@@ -5,17 +5,21 @@ import { basename, dirname, join } from 'node:path';
 import { Attempt, change, checked, checkWorkers, collectPages, command, hashes, help, independentChecks,
   isMain, lifecycle, options, pause, prepareFixture, repository, type Command, type Options } from './common.js';
 
-export async function pluginIdentity(run = command, signal?: AbortSignal) {
-  const pkg = JSON.parse(await readFile(join(repository, 'package.json'), 'utf8'));
+async function packageHashes(root: string) {
+  const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   const files: Record<string, string> = {};
   for (const path of ['package.json', 'package-lock.json', 'LICENSE']) {
-    files[path] = createHash('sha256').update(await readFile(join(repository, path))).digest('hex');
+    files[path] = createHash('sha256').update(await readFile(join(root, path))).digest('hex');
   }
   for (const dir of pkg.files.filter((p: string) => p !== 'LICENSE')) {
-    for (const [path, hash] of Object.entries(await hashes(join(repository, dir)))) files[`${dir}/${path}`] = hash;
+    for (const [path, hash] of Object.entries(await hashes(join(root, dir)))) files[`${dir}/${path}`] = hash;
   }
+  return files;
+}
+
+export async function pluginIdentity(run = command, signal?: AbortSignal) {
   return {source: await realpath(repository), revision: (await checked('git', ['rev-parse', 'HEAD'], {signal}, run)).trim(),
-    dirty: await checked('git', ['status', '--porcelain=v1'], {signal}, run), hashes: files};
+    dirty: await checked('git', ['status', '--porcelain=v1'], {signal}, run), hashes: await packageHashes(repository)};
 }
 
 export async function bbJson(args: string[], run: Command = command, env?: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<unknown> {
@@ -30,8 +34,14 @@ export async function bbPreflight(attempt: Attempt, signal: AbortSignal, run = c
   await attempt.record('plugins', plugins);
   const loop = plugins.plugins.find(p => p.id === 'openspec-verify-loop');
   assert(loop?.enabled && loop.status === 'running', 'Install and enable the loop plugin explicitly before testing');
-  assert.equal(loop.source, `path:${repository.replace(/\/$/, '')}`, `Install the tested checkout explicitly: bb plugin install path:${repository.replace(/\/$/, '')} --yes`);
-  assert.equal(await realpath(loop.rootDir), await realpath(repository), 'Installed plugin root differs from tested checkout');
+  if (loop.source.startsWith('git:')) {
+    // A git install adds bb's own bundles beside the committed ones, so compare only the tested checkout's files.
+    const tested = await packageHashes(repository), installed = await packageHashes(loop.rootDir);
+    assert(Object.entries(tested).every(([path, hash]) => installed[path] === hash), 'Installed git plugin files differ from the tested checkout');
+  } else {
+    assert.equal(loop.source, `path:${repository.replace(/\/$/, '')}`, `Install the tested checkout explicitly: bb plugin install path:${repository.replace(/\/$/, '')} --yes`);
+    assert.equal(await realpath(loop.rootDir), await realpath(repository), 'Installed plugin root differs from tested checkout');
+  }
   assert(plugins.plugins.some(p => p.id === 'workflows' && p.enabled && p.status === 'running'), 'Enable bb Workflows explicitly before testing');
   const providers = await bbJson(['provider', 'list'], run, undefined, signal) as {id: string; available: boolean}[];
   assert(Array.isArray(providers) && providers.some(p => p.id === input.provider && p.available), 'Selected bb provider unavailable');
@@ -244,6 +254,10 @@ export async function runBb(input: Options, run: Command = command) {
       if (current.summary && terminal(current.summary.status) && reported && inactive(current.origin)) {
         attempt.result.stage = 'assertion';
         bbLaunchChecks(attempt, current.originEvents, current.records!, current.summary);
+        // Workers read the procedure late; a provider's temporary skill copy can be gone by then (known issues).
+        const supplied = attempt.result.selectedProcedure as {path: string; hashes?: Record<string, string>} | undefined;
+        attempt.check('Supplied procedure outlives the run', !!supplied?.hashes &&
+          JSON.stringify(await hashes(dirname(supplied.path)).catch(() => null)) === JSON.stringify(supplied.hashes), supplied?.path);
         checkWorkers(attempt, attempt.result.resolvedSettings);
         if (input.scenario === 'fix-to-clean') await independentChecks(attempt, signal, run);
         else {

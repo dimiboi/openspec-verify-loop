@@ -11,14 +11,15 @@ test('bb preflight verifies installed source/settings without global mutation an
   const root = await mkdtemp(join(tmpdir(), 'live-bb-unit-')); t.after(() => rm(root, {recursive: true, force: true}));
   const input: Options = {host: 'bb', scenario: 'fix-to-clean', provider: 'fake', model: 'model', variant: 'default', mode: 'auto',
     procedure: '/unused/SKILL.md', timeout: 1000, cleanupTimeout: 1000, output: root};
-  let wrongSource = false;
+  let wrongSource = false; let gitRoot = '';
   const calls: string[][] = [];
   const fake: Command = async (file, args, opts) => {
     if (file !== 'bb') return command(file, args, opts);
     calls.push(args);
     let result: unknown;
     if (args[0] === 'plugin') result = {plugins: [{id: 'openspec-verify-loop', enabled: true, status: 'running',
-      source: wrongSource ? 'path:/other/checkout' : `path:${repository.replace(/\/$/, '')}`, rootDir: repository},
+      source: gitRoot ? 'git:github.com/example/openspec-verify-loop@abc' : wrongSource ? 'path:/other/checkout' : `path:${repository.replace(/\/$/, '')}`,
+      rootDir: gitRoot || repository},
     {id: 'workflows', enabled: true, status: 'running'}]};
     else if (args[0] === 'provider' && args[1] === 'list') result = [{id: 'fake', available: true}];
     else if (args[0] === 'provider') result = [{id: 'model', defaultReasoningEffort: 'medium', supportedReasoningEfforts: [{reasoningEffort: 'medium'}]}];
@@ -35,11 +36,19 @@ test('bb preflight verifies installed source/settings without global mutation an
   await checkPluginUnchanged(attempt, fake); assert.equal(attempt.result.assertions.at(-1)?.passed, false);
   wrongSource = true;
   await assert.rejects(bbPreflight(await Attempt.create(input), AbortSignal.timeout(5000), fake), /Install the tested checkout/);
+  // A git install's cached copy may carry bb-built bundles, but every tested file must match.
+  gitRoot = join(root, 'git-install');
+  const pkg = JSON.parse(await readFile(join(repository, 'package.json'), 'utf8'));
+  for (const path of ['package.json', 'package-lock.json', ...pkg.files]) await cp(join(repository, path), join(gitRoot, path), {recursive: true});
+  await writeFile(join(gitRoot, 'dist/server.js'), 'built by bb');
+  await bbPreflight(await Attempt.create(input), AbortSignal.timeout(5000), fake);
+  await writeFile(join(gitRoot, 'dist/index.js'), 'stale');
+  await assert.rejects(bbPreflight(await Attempt.create(input), AbortSignal.timeout(5000), fake), /differ from the tested checkout/);
   assert(!calls.some(args => args.includes('install') || args.includes('enable') || args.includes('config')));
 });
 
 async function fakeBb(t: {after(fn: () => unknown): void}, settings: {scenario?: Options['scenario']; race?: boolean;
-  wrongModel?: boolean; failCleanup?: boolean; lostSpawn?: boolean; pages?: boolean; blockedVerdict?: boolean; stagedProcedure?: boolean; badPreview?: boolean} = {}) {
+  wrongModel?: boolean; failCleanup?: boolean; lostSpawn?: boolean; pages?: boolean; blockedVerdict?: boolean; stagedProcedure?: boolean; lostProcedure?: boolean; badPreview?: boolean} = {}) {
   const root = await mkdtemp(join(tmpdir(), 'live-bb-records-')); t.after(() => rm(root, {recursive: true, force: true}));
   const procedure = join(root, 'installed'); await mkdir(procedure);
   await writeFile(join(procedure, 'SKILL.md'), '---\nname: openspec-verify-change\n---\nTest procedure\n');
@@ -112,6 +121,7 @@ async function fakeBb(t: {after(fn: () => unknown): void}, settings: {scenario?:
       else if (args[1] === 'stop') { stopped = true; data = {status: 'cancelled'}; }
       else if (args[1] === 'status') {
         if (done() && !stopped) await writeFile(join(fixture, 'greet.mjs'), "export const greet = name => `Hello, ${name || 'world'}!`;\n");
+        if (done() && settings.lostProcedure) await rm(stage, {recursive: true, force: true});
         data = {id: 'wfr_test', status: status(), finishedAt: done() ? 1800 : undefined, calls: {running: done() ? 0 : 1, queued: 0},
           result: done() && !stopped ? {status: settings.blockedVerdict ? 'blocked' : 'clean', change: 'add-greeting', rounds: 2,
             ...(settings.blockedVerdict ? {reason: 'Unrecognized verifier result', report: 'VERDICT: CLEAN\nAdditional footer'} : {})} : undefined};
@@ -186,4 +196,12 @@ test('bb clean repair still fails when the preview names a different run', async
   assert.equal(attempt.result.assertions.find(c => c.name === 'Independent greeting behavior')?.passed, true);
   assert.equal(attempt.result.cleanup.confirmed, true);
   assert.equal(fake.calls.filter(c => c.args[0] === 'thread' && c.args[1] === 'spawn').length, 1);
+});
+
+test('bb fails a run whose supplied procedure is a temporary copy deleted during the run', async t => {
+  const fake = await fakeBb(t, {stagedProcedure: true, lostProcedure: true});
+  const {attempt, code} = await runBb(fake.input, fake.run);
+  assert.equal(code, 1); assert.equal(attempt.result.terminal?.status, 'clean');
+  assert.equal(attempt.result.assertions.find(c => c.name === 'Change and supplied procedure reach workflow')?.passed, true);
+  assert.equal(attempt.result.assertions.find(c => c.name === 'Supplied procedure outlives the run')?.passed, false);
 });
