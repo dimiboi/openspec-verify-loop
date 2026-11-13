@@ -9,7 +9,7 @@ ID for reference.
 | ID | Improvement | Add when |
 | --- | --- | --- |
 | C21 | Pass the previous report to the next verifier, which must confirm each earlier issue resolved while still running the full procedure. | A run reaches `clean` while an earlier finding is still present. |
-| C18 | A check helper script, shipped in the skill directory, that workers on both hosts run for tests, `openspec validate --strict` and configured checks, copying its compact summary into their reply. The summary is still relayed by the model. | A run reaches `clean` with failing or unrun tests, or misreports a test result. |
+| C18 | A check helper script, shipped in the skill directory, that workers on any host run for tests, `openspec validate --strict` and configured checks, copying its compact summary into their reply. The summary is still relayed by the model. | A run reaches `clean` with failing or unrun tests, or misreports a test result. |
 | C27 | A full report parser: finding IDs, per-finding dispositions, contradiction detection. | A verifier writes `VERDICT: CLEAN` while its report lists issues and the current count check misses it. |
 | C30 | An evidence ledger compared with the files at the end of the run, so that check results no longer depend on the model relaying them. | Check results relayed by a worker are found altered. |
 | C32 | A before/after snapshot that detects edits during verification or a changed HEAD. | Verifiers edit files through the shell despite the prompt rule, or a worker commits despite the no-commit rule. |

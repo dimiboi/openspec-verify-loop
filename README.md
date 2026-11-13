@@ -1,8 +1,8 @@
 # OpenSpec verification loop
 
 Verifies an OpenSpec change, sends the full report to a fresh fixer, and repeats
-the verification until it is clean. It installs as a plugin on bb or OpenCode.
-Both hosts run the same loop script,
+the verification until it is clean. It installs as a plugin on bb, OpenCode or
+Pi. All three hosts run the same loop script,
 [`skills/openspec-verify-loop/verify-loop.js`](skills/openspec-verify-loop/verify-loop.js).
 
 Each round:
@@ -271,11 +271,13 @@ default. The offline snapshot test installs production dependencies from that
 cache, so an `ENOTCACHED` failure in `tests/live-opencode.test.ts` means the
 caches differ.
 
-`check` type-checks, builds `dist/index.js`, runs the deterministic tests and
-validates the package. The tests use fake hosts and workers; they call no model
-and start no OpenCode session. `dist/index.js` is committed so Git installs need
-no build. The bundler script is named `bundle` because npm treats a `build`
-script as a Git preparation trigger.
+`check` type-checks, builds the committed `dist/index.js`, `dist/pi.js` and
+`dist/pi-supervisor.js`, runs the deterministic tests and validates the package.
+The tests use fake hosts and workers; they call no model and start no OpenCode
+session, though some Pi checks run local subprocesses against the installed
+Durable package to verify ownership and cancellation. Those bundles are
+committed so Git installs need no build. The bundler script is named `bundle`
+because npm treats a `build` script as a Git preparation trigger.
 
 See [verification and manual testing](docs/verification.md) for the manual
 checks on each host.

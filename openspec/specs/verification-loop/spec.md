@@ -4,7 +4,7 @@
 
 Automates the manual OpenSpec verify-and-fix cycle: fresh verifier and fixer
 sessions alternate on one change until a verification finds no issues, with the
-same behaviour on bb and OpenCode.
+same behaviour on bb, OpenCode and Pi.
 
 ## Requirements
 
@@ -14,10 +14,6 @@ and Pi plugins run unchanged. The script SHALL use only the host-provided
 `agent`, `phase`, `log`, `args` and `budget` globals, and no clock, randomness,
 filesystem, network or imports. Host adapters SHALL NOT duplicate its round,
 verdict or prompt decisions.
-
-#### Scenario: Same file on both hosts
-- **WHEN** the package is installed on bb and on OpenCode
-- **THEN** both hosts run the same `verify-loop.js` file, and that file passes `bb workflows validate --script`
 
 #### Scenario: Same file on all hosts
 - **WHEN** the package is installed on bb, OpenCode and Pi

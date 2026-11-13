@@ -12,9 +12,10 @@ default. The offline snapshot test installs production dependencies from that
 cache; an `ENOTCACHED` failure in `tests/live-opencode.test.ts` means the caches
 differ.
 
-The suite checks types, builds `dist/index.js`, runs the tests and validates the
-package. Tests use fake host and worker adapters; no model request, real Pi or OpenCode
-session or bb workflow is started. Local subprocess checks verify Pi ownership
+The suite checks types, builds `dist/index.js`, `dist/pi.js` and
+`dist/pi-supervisor.js`, runs the tests and validates the package. Tests use
+fake host and worker adapters; no model request, real Pi or OpenCode session or
+bb workflow is started. Local subprocess checks verify Pi ownership
 and cancellation; these need permission to inspect process identities with `ps`.
 
 Pi deterministic checks cover invoking settings/auth, explicit role tools,
@@ -135,8 +136,10 @@ shipped as plugin resources.
 - **Packaging** (`tests/package.test.ts`, `scripts/validate-plugin.mjs`): npm's
   resolver against a local Git fixture reproduces the preparation failure a
   `build` script causes, then confirms the package ships `dist/index.js`,
-  `bb/server.ts`, both skills and the loop script without starting child npm.
-  The validator checks the bb manifest and both skill texts.
+  `dist/pi.js`, `dist/pi-supervisor.js`, `bb/server.ts`, both skills and the loop
+  script without starting child npm. The validator checks the bb and Pi
+  manifests, `engines.node`, the optional Pi peer dependencies, both skill texts,
+  and imports both plugin entries.
 
 ## Live fixture and independent checks
 
@@ -299,8 +302,8 @@ restrictions seen so far; bb's validator is the authority.
 
 1. Install the plugin from Git (or point a project's plugin entry at this
    checkout and run `npm run bundle`). Confirm `/opsx-verify-loop`,
-   `/opsx-verify-loop-stop`, the `openspec_verify_loop` tool and the skill are
-   available.
+   `/opsx-verify-loop-stop`, `/opsx-verify-loop-report`, the
+   `openspec_verify_loop` tool and the skill are available.
 2. Select a model other than the server default, then run
    `/opsx-verify-loop <change>`. Confirm the start result names that model, each
    worker session uses it, and verifier and fixer sessions alternate.
@@ -308,9 +311,12 @@ restrictions seen so far; bb's validator is the authority.
    use tools, while an ordinary later turn keeps its tools.
 4. Start another run and use `/opsx-verify-loop-stop` during a worker. Confirm the
    worker session is interrupted and the notice reports `stopped`.
-5. From a worker session, run `/opsx-verify-loop <change>` (or call
-   `openspec_verify_loop`). Confirm the result is `blocked` with "Loop workers
-   cannot invoke the loop management interface" and no session is created.
+5. From a worker session, run `/opsx-verify-loop <change>`. Confirm the result is
+   `blocked` with "Loop workers cannot invoke the loop management interface" and
+   no session is created. Calling the `openspec_verify_loop` tool from that
+   session instead fails earlier with the tool error "Loop workers cannot invoke
+   loop management", and the worker's `openspec_verify_loop` permission is
+   denied; no run is dispatched either way.
 
 6. In an isolated nested Git project, create a worker through the adapter using
    the invoking subdirectory. Read the native session's location/subpath and
@@ -509,8 +515,8 @@ the names the runs used; the renamed-commands row checks the new names.
 | bb#6871 fix, catalogue (no custom profile) | 2026-11-08 | bb 0.49.0, built-in `acp-opencode`, OpenCode 2.2.5, `customAgents` unset | n/a | `bb provider models acp-opencode --project <id> --selected-model lmstudio/recursivesi/flint --json`, 7 rounds 70 s apart in 4 projects, then once in a fresh worktree | Flint `known`, `[medium, default]` in 29 of 29 reads (0.48.1: `[]` in most); Bonsai `known`, `[]` |
 | bb#6792 fix, Workflows (no custom profile) | 2026-11-08 | bb 0.49.0, built-in `acp-opencode`, `lmstudio/recursivesi/flint`, medium, `full`, worktree sub-thread `thr_73ydnfk84p` | n/a | `wfr_d21aacd5-a604-4569-b4f9-d6056571dd5b` (inherited `agent()`), `wfr_e65a65bd-7767-49d9-b4f6-cd427f845bd1` (Flint at `medium`), `wfr_84dca662-cd8f-478e-bd77-6e98092767bc` (Bonsai, empty list, at `medium`) | all three validate; both Flint runs succeed with the exact reply; the Bonsai selection is accepted and its worker dispatched, then LM Studio refuses the prompt as longer than Bonsai's loaded context length |
 
-The Git install in task 4.5 was waived until the branch is pushed; the plugin was
-loaded from the checkout path instead.
+The Git install in task 4.5 was waived because the branch was not yet pushed;
+the plugin was loaded from the checkout path instead.
 
 ## Pi Durable implementation checks (2026-11-09)
 

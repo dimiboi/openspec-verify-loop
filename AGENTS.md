@@ -2,7 +2,7 @@
 
 - Use Node.js >=22.19 and `npm ci`. Run `npm run check` for code changes: types, build, deterministic tests, and package validation. Documentation-only edits do not need the suite.
 - Run `npm ci` and `npm run check` with the same npm cache (the same `npm_config_cache`, or both on the default): the offline snapshot test installs production dependencies from that cache, and an `ENOTCACHED` failure in `tests/live-opencode.test.ts` means the caches differ.
-- Edit `src/`; `npm run bundle` generates the committed `dist/index.js`. Keep host SDK/runtime dependencies external to the bundle.
+- Edit `src/`; `npm run bundle` generates the committed `dist/index.js`, `dist/pi.js` and `dist/pi-supervisor.js`. Keep host SDK/runtime dependencies external to the bundle.
 - Resolve packaged resources from `import.meta.url` and consuming project paths from the invoking session's location. The plugin must never start, replace, or stop an OpenCode service.
 
 ## Loop invariants
@@ -16,8 +16,8 @@
 - On Pi, report opens the Durable JSONL store read-only (`{readOnly: true}` on both the storage open and the Harness), afresh for each report, and never writes or needs ownership. Every writable open (start, resume, stop, cleanup) happens under exclusive checkout ownership: a writable JSONL open repairs files on recovery.
 - On OpenCode, workers cannot start or stop loops or delegate further workers, and reporting turns cannot use tools. On bb, the server entry hides the skill from Workflows workers and the prompts forbid loops, but `bb workflows run` stays reachable from a worker's shell; see [docs/known-issues.md](docs/known-issues.md).
 
-The automated suite uses fake host/model adapters; it must not call models or start OpenCode sessions. Real-host testing is manual; see [docs/verification.md](docs/verification.md).
+The automated suite uses fake host/model adapters; it must not call models or start OpenCode sessions. Some Pi checks run local subprocesses against the installed Durable package, still with no model request. Real-host testing is manual; see [docs/verification.md](docs/verification.md).
 
 Possible additions wait for an observed trigger; they are listed in [docs/future-improvements.md](docs/future-improvements.md). Do not build one before its trigger is seen.
 
-Upstream bb, OpenCode and OpenSpec bugs that shape the plugin, and their workarounds, are listed in [docs/known-issues.md](docs/known-issues.md). Check it before changing a workaround, and update it when an upstream fix ships.
+Upstream bb, OpenCode, Pi Durable and OpenSpec bugs that shape the plugin, and their workarounds, are listed in [docs/known-issues.md](docs/known-issues.md). Check it before changing a workaround, and update it when an upstream fix ships.

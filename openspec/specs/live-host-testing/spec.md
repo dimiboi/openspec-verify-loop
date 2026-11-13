@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Lets maintainers repeat real bb and OpenCode loop checks from isolated fixtures, assess behavior independently of model reports, and retain enough evidence to investigate every attempt.
+Lets maintainers repeat real bb, OpenCode and Pi loop checks from isolated fixtures, assess behavior independently of model reports, and retain enough evidence to investigate every attempt.
 
 ## Requirements
 
