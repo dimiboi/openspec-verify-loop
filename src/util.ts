@@ -5,6 +5,7 @@ import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 export const OPENCODE_VERSION = '2.2.5';
+export const PI_VERSION = '1.5.2';
 export class LoopError extends Error {
   constructor(public outcome: string, message: string) { super(message); }
 }

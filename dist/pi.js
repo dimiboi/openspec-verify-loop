@@ -19,6 +19,7 @@ import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
+var PI_VERSION = "1.5.2";
 var LoopError = class extends Error {
   constructor(outcome, message) {
     super(message);
@@ -755,7 +756,7 @@ var PiService = class {
     }
   }
   async start(text, ctx) {
-    if (VERSION !== "1.5.2") throw new Error(`Pi loop requires Pi 1.5.2; found ${VERSION}`);
+    if (VERSION !== PI_VERSION) throw new Error(`Pi loop requires Pi ${PI_VERSION}; found ${VERSION}`);
     const args = parseStart(text);
     const { settings, models } = await captureSettings(this.pi, ctx, this.stateHome);
     const opened = await this.open(ctx.cwd, models);
@@ -788,7 +789,7 @@ var PiService = class {
     return run;
   }
   async resume(text, ctx) {
-    if (VERSION !== "1.5.2") throw new Error(`Pi loop requires Pi 1.5.2; found ${VERSION}`);
+    if (VERSION !== PI_VERSION) throw new Error(`Pi loop requires Pi ${PI_VERSION}; found ${VERSION}`);
     const id = parseRunId(text);
     await this.settle();
     if (this.active) throw new Error(`Run ${this.active.id} is already running or awaiting cleanup; use stop`);
