@@ -43,8 +43,9 @@ function fakeHost(options: unknown = {}) {
 }
 
 /** A tool registered on a service whose host connection is a fake client. */
-async function loopTool(options: FakeOptions = {}, model: {providerID: string; id: string; variant?: string} = invoking) {
-  const host = fakeHost();
+async function loopTool(options: FakeOptions = {}, model: {providerID: string; id: string; variant?: string} = invoking,
+  hostOptions: unknown = {}) {
+  const host = fakeHost(hostOptions);
   host.history([{type: 'assistant', id: 'invoking', model}, {type: 'model-switched', id: 'switch', model: switched}]);
   const fake = fakeClient({replies: ['## Verification Report: add-export\nVERDICT: CLEAN'], ...options});
   const notices: Record<string, unknown>[] = [];
@@ -60,7 +61,7 @@ test('command grammar validates change names and never accepts shell fragments',
   assert.deepEqual(parseCommand('opsx-verify-loop', ''), {action: 'run'});
   assert.deepEqual(parseCommand('opsx-verify-loop', 'add-export'), {action: 'run', change: 'add-export'});
   assert.deepEqual(parseCommand('opsx-verify-loop-stop', ''), {action: 'stop'});
-  for (const value of ['add-export;rm', '$(cmd)', '--help', 'one two', '../change']) assert.throws(() => parseCommand('opsx-verify-loop', value));
+  for (const value of ['add-export;rm', '$(cmd)', '--help', 'one two', '../change', '--store team', '--max-rounds 3']) assert.throws(() => parseCommand('opsx-verify-loop', value));
   assert.throws(() => parseCommand('opsx-verify-loop-stop', 'add-export'));
 });
 
@@ -69,7 +70,8 @@ test('plugin options accept only server and maxRounds', async () => {
   for (const removed of ['verifierModel', 'fixerModel', 'skill', 'stateDir', 'maxMinutes', 'checks']) {
     assert.throws(() => configSchema.parse({[removed]: 'x'}));
   }
-  for (const options of [{bogus: 1}, {server: 'not a url'}, {maxRounds: 0}, {maxRounds: 1.5}]) {
+  assert.deepEqual(configSchema.parse({}), {});
+  for (const options of [{bogus: 1}, {server: 'not a url'}, {maxRounds: 0}, {maxRounds: 1.5}, {maxRounds: '3'}, {maxRounds: Number.MAX_SAFE_INTEGER + 1}]) {
     const host = fakeHost(options);
     await assert.rejects(setupPlugin(host.ctx), Error, JSON.stringify(options));
     assert.equal(host.commands.length + host.tools.length + host.skills.length, 0, 'nothing is registered');
@@ -90,7 +92,12 @@ test('registrations load the OpenCode skill text and the commands and tool share
   assert.deepEqual(Object.keys(commandActions), ['opsx-verify-loop', 'opsx-verify-loop-stop', 'opsx-verify-loop-report']);
   assert.equal(host.tools[0]?.name, MANAGEMENT_TOOL);
   assert.equal((host.tools[0] as any).input.type, 'object');
+  assert.equal((host.tools[0] as any).input.additionalProperties, false);
+  assert.deepEqual((host.tools[0] as any).input.required, ['action']);
   assert.deepEqual((host.tools[0] as any).input.properties.action.enum, ['run', 'stop', 'report']);
+  assert.equal((host.tools[0] as any).input.properties.maxRounds.type, 'integer');
+  assert.equal((host.tools[0] as any).input.properties.maxRounds.default, undefined);
+  for (const field of ['change', 'store', 'maxRounds']) assert.match((host.tools[0] as any).input.properties[field].description, /only for run/);
   assert.match(host.skills[0].content, /openspec_verify_loop/);
   assert.match(host.skills[0].path, /opencode\/SKILL\.md$/);
   await host.commands.find(command => command.name === 'opsx-verify-loop-stop')!.execute({sessionID: 'parent', prompt: {text: ''}});
@@ -117,11 +124,33 @@ test('tool input with an unknown field, a field its action does not accept or a 
   const host = fakeHost();
   let calls = 0;
   await registerTool(host.ctx, {execute: async () => {calls++; return {};}} as unknown as LoopService);
-  for (const input of [{action: 'run', bogus: 1}, {action: 'stop', change: 'add-export'}, {action: 'report', store: 'x'}, {action: 'run', maxRounds: 0}]) {
+  const invalid = [
+    ...['run', 'stop', 'report'].map(action => ({action, bogus: 1})),
+    ...['stop', 'report'].flatMap(action => [{action, change: 'add-export'}, {action, store: 'x'}, {action, maxRounds: 3}]),
+    ...[0, -1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '3', '1e2'].map(maxRounds => ({action: 'run', maxRounds})),
+    {action: 'run', change: 'bad_name'}, {action: 'run', store: '../bad'},
+  ];
+  for (const input of invalid) {
     await assert.rejects(host.tools[0]!.execute(input, {sessionID: 'parent', messageID: 'm', agent: 'build', id: 'call'}), Error, JSON.stringify(input));
   }
   assert.equal(calls, 0);
   assert.equal(host.assertions(), 0, 'invalid input is refused before approval');
+});
+
+test('tool round limits use the explicit value, then configuration, then the workflow default', async t => {
+  for (const {options, input, limit} of [
+    {options: {maxRounds: 3}, input: {maxRounds: 2}, limit: 2},
+    {options: {maxRounds: 3}, input: {}, limit: 3},
+    {options: {}, input: {}, limit: 5},
+  ]) {
+    const {run, notices, stats, manager} = await loopTool({replies: Array(9).fill('VERDICT: ISSUES')}, invoking, options);
+    t.after(() => manager.close());
+    assert.equal((await run({change: 'add-export', ...input})).outcome, 'started');
+    await until(() => notices.length === 1);
+    assert.equal(notices[0]!.status, 'limit');
+    assert.equal(notices[0]!.rounds, limit);
+    assert.equal(stats.prompts, 2 * limit - 1);
+  }
 });
 
 test('workers use the invoking turn\'s model after a session model switch', async () => {

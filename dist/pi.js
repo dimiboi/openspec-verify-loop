@@ -13,6 +13,17 @@ import { parseArgs } from "node:util";
 import { getAgentDir, loadProjectContextFiles } from "@earendil-works/pi-coding-agent";
 import { createModels } from "@earendil-works/pi-ai";
 
+// src/arguments.ts
+import { z } from "zod";
+var changeName = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+var storeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+var maxRounds = z.number().int().positive();
+var startArgumentsSchema = z.strictObject({
+  change: changeName.optional(),
+  store: storeId.optional(),
+  maxRounds: maxRounds.optional()
+});
+
 // src/util.ts
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
@@ -55,13 +66,13 @@ function parseStart(text) {
     allowPositionals: true,
     options: { store: { type: "string" }, "max-rounds": { type: "string" } }
   });
-  if (positionals.length > 1 || positionals[0] && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(positionals[0])) {
+  if (positionals.length > 1 || positionals[0] && !changeName.safeParse(positionals[0]).success) {
     throw new Error("Expected at most one kebab-case change name");
   }
-  if (values.store !== void 0 && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(values.store)) throw new Error("Invalid store ID");
-  const maxRounds = values["max-rounds"] === void 0 ? 5 : Number(values["max-rounds"]);
-  if (!Number.isSafeInteger(maxRounds) || maxRounds <= 0) throw new Error("maxRounds must be a positive integer");
-  return { ...positionals[0] ? { change: positionals[0] } : {}, ...values.store ? { store: values.store } : {}, maxRounds };
+  if (values.store !== void 0 && !storeId.safeParse(values.store).success) throw new Error("Invalid store ID");
+  const maxRounds2 = values["max-rounds"] === void 0 ? 5 : Number(values["max-rounds"]);
+  if (!maxRounds.safeParse(maxRounds2).success) throw new Error("maxRounds must be a positive integer");
+  return { ...positionals[0] ? { change: positionals[0] } : {}, ...values.store ? { store: values.store } : {}, maxRounds: maxRounds2 };
 }
 function parseRunId(text) {
   const id = text.trim();

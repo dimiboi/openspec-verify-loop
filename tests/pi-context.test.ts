@@ -8,10 +8,41 @@ import { ModelRegistry, ModelRuntime, type ExtensionAPI, type ExtensionContext }
 import { captureSettings, modelsFor, parseRunId, parseStart } from '../src/pi-context.js';
 import { fakeRegistry, model } from './pi-fakes.js';
 
-test('Pi arguments validate names, stores, limits and control identities', () => {
+test('Pi start arguments preserve omitted keys, defaults and numeric conversion', () => {
   assert.deepEqual(parseStart(''), {maxRounds: 5});
+  assert.deepEqual(parseStart(' \t '), {maxRounds: 5});
+  assert.deepEqual(parseStart('add-export'), {change: 'add-export', maxRounds: 5});
+  assert.deepEqual(parseStart('--store Team_1.specs-2'), {store: 'Team_1.specs-2', maxRounds: 5});
   assert.deepEqual(parseStart('add-export --store team-specs --max-rounds 3'), {change: 'add-export', store: 'team-specs', maxRounds: 3});
-  for (const value of ['a b', 'bad_name', '--wat', '--store ../x', '--max-rounds 0', '--max-rounds NaN', '--max-rounds 1.5', '--max-rounds Infinity']) assert.throws(() => parseStart(value), value);
+  for (const [value, expected] of [['1', 1], ['1e2', 100], ['0x10', 16], ['03', 3], ['+2', 2], ['3.0', 3], ['9007199254740991', Number.MAX_SAFE_INTEGER]] as const) {
+    assert.deepEqual(parseStart(`--max-rounds=${value}`), {maxRounds: expected});
+  }
+});
+
+test('Pi start arguments keep field errors and validation order after parseArgs', () => {
+  const changeError = {message: 'Expected at most one kebab-case change name'};
+  const storeError = {message: 'Invalid store ID'};
+  const limitError = {message: 'maxRounds must be a positive integer'};
+  for (const value of ['a b', 'bad_name', 'Bad', '-bad', 'bad-', 'bad--name', '../change', '"add-export"']) {
+    assert.throws(() => parseStart(`-- ${value}`), changeError, value);
+  }
+  for (const value of ['', '../x', '-bad', '.bad', 'a/b']) {
+    assert.throws(() => parseStart(`--store=${value}`), storeError, value);
+  }
+  for (const value of ['', '0', '-1', 'NaN', '1.5', 'Infinity', '9007199254740992', '1e100']) {
+    assert.throws(() => parseStart(`--max-rounds=${value}`), limitError, value);
+  }
+  assert.throws(() => parseStart('bad_name --store=../bad --max-rounds=0'), changeError);
+  assert.throws(() => parseStart('one two --store=../bad --max-rounds=0'), changeError);
+  assert.throws(() => parseStart('add-export --store=../bad --max-rounds=0'), storeError);
+  assert.throws(() => parseStart('add-export --store=team --max-rounds=0'), limitError);
+  assert.throws(() => parseStart('bad_name --wat'), {code: 'ERR_PARSE_ARGS_UNKNOWN_OPTION'});
+  for (const value of ['--store', '--max-rounds']) {
+    assert.throws(() => parseStart(value), {code: 'ERR_PARSE_ARGS_INVALID_OPTION_VALUE'});
+  }
+});
+
+test('Pi control arguments validate run identities', () => {
   assert.equal(parseRunId(''), undefined);
   assert.equal(parseRunId('run_123abc'), 'run_123abc');
   assert.throws(() => parseRunId('run_a run_b'));

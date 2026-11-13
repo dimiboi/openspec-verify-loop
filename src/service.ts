@@ -1,6 +1,7 @@
 import type { Plugin } from '@opencode/plugin';
 import { realpath } from 'node:fs/promises';
 import { z } from 'zod';
+import { changeName, storeId, maxRounds, startArgumentsSchema } from './arguments.js';
 import { configSchema } from './config.js';
 import { loadScript, runScript } from './loop.js';
 import { RunManager } from './manager.js';
@@ -8,9 +9,6 @@ import { connectToHost, resolveOriginModel, type Catalog, type Model, type OpenC
 import { createAgent } from './runner.js';
 import { LoopError, projectRoot, sessionDirectory } from './util.js';
 
-const changeName = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
-const storeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
-const maxRounds = z.number().int().positive();
 // Function-tool providers require an object schema at the root. Enforce action-specific
 // fields with actionSchema at execution, rather than exposing a root-level union.
 export const toolInputSchema = z.strictObject({
@@ -20,7 +18,7 @@ export const toolInputSchema = z.strictObject({
   maxRounds: maxRounds.optional().describe('Verification round limit; only for run. Default 5.'),
 });
 export const actionSchema = z.discriminatedUnion('action', [
-  z.strictObject({action: z.literal('run'), change: changeName.optional(), store: storeId.optional(), maxRounds: maxRounds.optional()}),
+  z.strictObject({action: z.literal('run'), ...startArgumentsSchema.shape}),
   z.strictObject({action: z.literal('stop')}),
   z.strictObject({action: z.literal('report')}),
 ]);

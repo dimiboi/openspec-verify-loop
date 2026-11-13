@@ -3,10 +3,11 @@ import { readFile, realpath } from 'node:fs/promises';
 import { parseArgs } from 'node:util';
 import { getAgentDir, loadProjectContextFiles, type ExtensionAPI, type ExtensionContext, type ModelRegistry } from '@earendil-works/pi-coding-agent';
 import { createModels, type Models, type ModelThinkingLevel } from '@earendil-works/pi-ai';
+import { changeName, storeId, maxRounds as maxRoundsSchema, type StartArguments } from './arguments.js';
 import { projectRoot } from './util.js';
 
 export const hash = (text: string) => createHash('sha256').update(text).digest('hex');
-export type PiArguments = {change?: string; store?: string; maxRounds: number};
+export type PiArguments = StartArguments & {maxRounds: number};
 export type PiSettings = {
   checkout: string; directory: string; origin: string;
   model: {provider: string; modelId: string}; thinkingLevel: ModelThinkingLevel | null;
@@ -16,12 +17,12 @@ export type PiSettings = {
 export function parseStart(text: string): PiArguments {
   const {values, positionals} = parseArgs({args: text.trim() ? text.trim().split(/\s+/) : [], allowPositionals: true,
     options: {store: {type: 'string'}, 'max-rounds': {type: 'string'}}});
-  if (positionals.length > 1 || (positionals[0] && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(positionals[0]))) {
+  if (positionals.length > 1 || (positionals[0] && !changeName.safeParse(positionals[0]).success)) {
     throw new Error('Expected at most one kebab-case change name');
   }
-  if (values.store !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(values.store)) throw new Error('Invalid store ID');
+  if (values.store !== undefined && !storeId.safeParse(values.store).success) throw new Error('Invalid store ID');
   const maxRounds = values['max-rounds'] === undefined ? 5 : Number(values['max-rounds']);
-  if (!Number.isSafeInteger(maxRounds) || maxRounds <= 0) throw new Error('maxRounds must be a positive integer');
+  if (!maxRoundsSchema.safeParse(maxRounds).success) throw new Error('maxRounds must be a positive integer');
   return {...(positionals[0] ? {change: positionals[0]} : {}), ...(values.store ? {store: values.store} : {}), maxRounds};
 }
 

@@ -6,15 +6,28 @@ import { readFile as readFile2 } from "node:fs/promises";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/config.ts
+import { z as z2 } from "zod";
+
+// src/arguments.ts
 import { z } from "zod";
-var configSchema = z.strictObject({
-  server: z.url().optional(),
-  maxRounds: z.number().int().positive().optional()
+var changeName = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
+var storeId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
+var maxRounds = z.number().int().positive();
+var startArgumentsSchema = z.strictObject({
+  change: changeName.optional(),
+  store: storeId.optional(),
+  maxRounds: maxRounds.optional()
+});
+
+// src/config.ts
+var configSchema = z2.strictObject({
+  server: z2.url().optional(),
+  maxRounds: maxRounds.optional()
 });
 
 // src/service.ts
 import { realpath as realpath2 } from "node:fs/promises";
-import { z as z2 } from "zod";
+import { z as z3 } from "zod";
 
 // src/loop.ts
 import { readFile } from "node:fs/promises";
@@ -385,19 +398,16 @@ function createAgent(o) {
 }
 
 // src/service.ts
-var changeName = z2.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/);
-var storeId = z2.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/);
-var maxRounds = z2.number().int().positive();
-var toolInputSchema = z2.strictObject({
-  action: z2.enum(["run", "stop", "report"]),
+var toolInputSchema = z3.strictObject({
+  action: z3.enum(["run", "stop", "report"]),
   change: changeName.optional().describe("Change name; only for run. Omit to let the first verifier select the active change."),
   store: storeId.optional().describe("OpenSpec store ID; only for run."),
   maxRounds: maxRounds.optional().describe("Verification round limit; only for run. Default 5.")
 });
-var actionSchema = z2.discriminatedUnion("action", [
-  z2.strictObject({ action: z2.literal("run"), change: changeName.optional(), store: storeId.optional(), maxRounds: maxRounds.optional() }),
-  z2.strictObject({ action: z2.literal("stop") }),
-  z2.strictObject({ action: z2.literal("report") })
+var actionSchema = z3.discriminatedUnion("action", [
+  z3.strictObject({ action: z3.literal("run"), ...startArgumentsSchema.shape }),
+  z3.strictObject({ action: z3.literal("stop") }),
+  z3.strictObject({ action: z3.literal("report") })
 ]);
 var LoopService = class {
   constructor(ctx, manager, connect = connectToHost, pollMs) {
@@ -580,12 +590,12 @@ var RunManager = class {
 };
 
 // src/tools.ts
-import { z as z3 } from "zod";
+import { z as z4 } from "zod";
 async function registerTool(ctx, service) {
   return ctx.tool.transform((editor) => editor.add({
     name: MANAGEMENT_TOOL,
     description: "Run or stop the OpenSpec verification/fix loop, or report to retrieve and retry undelivered results. Each verification and fix uses a fresh session with this turn's model. Run returns at once; the result arrives as a session notice.",
-    input: z3.toJSONSchema(toolInputSchema),
+    input: z4.toJSONSchema(toolInputSchema),
     options: { permission: MANAGEMENT_TOOL },
     async execute(input, tool) {
       const session = await ctx.session.get({ sessionID: tool.sessionID });
