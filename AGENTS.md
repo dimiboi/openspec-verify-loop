@@ -1,9 +1,10 @@
 # Working in this repository
 
-- Use Node.js >=22.19 and `npm ci`. Run `npm run check` for code changes: types, build, deterministic tests, and package validation. Edits to docs, specs or `.github/workflows/ci.yml` do not need the suite, except a change to its `node:` matrix, which needs `node scripts/validate-plugin.mjs`; run `openspec validate --specs` after editing a spec.
+- For bug fixes, trace the failure to its cause before editing. Make the smallest complete correction in the code responsible, checking affected callers and hosts. Add a focused regression test where practical. If the cause is upstream and cannot be fixed here, use a narrow workaround and document its cause and removal condition in `docs/known-issues.md`.
+- Use Node.js >=22.19. Use `npm ci` when installing dependencies; dependency updates use `npm install` as described below. Run `npm run check` for code changes: types, build, deterministic tests, and package validation. Edits to docs, specs or `.github/workflows/ci.yml` do not need the suite, except a change to its `node:` matrix, which needs `node scripts/validate-plugin.mjs`; run `openspec validate --specs` after editing a spec.
 - If `npm ls` reports missing packages, run `npm ci`; a read-only task reports it instead of working around it.
 - Run `npm ci` and `npm run check` with the same npm cache (the same `npm_config_cache`, or both on the default): the offline snapshot test installs production dependencies from that cache, and an `ENOTCACHED` failure in `tests/live-opencode.test.ts` means the caches differ.
-- Edit `src/`; `npm run bundle` generates the committed `dist/index.js`, `dist/pi.js` and `dist/pi-supervisor.js`. Keep host SDK/runtime dependencies external to the bundle.
+- Edit source files, never generated `dist/` files directly. `npm run bundle` regenerates the committed `dist/index.js`, `dist/pi.js` and `dist/pi-supervisor.js`. Keep host SDK/runtime dependencies external to the bundle.
 - Resolve packaged resources from `import.meta.url` and consuming project paths from the invoking session's location. The plugin must never start, replace, or stop an OpenCode service.
 - README and `docs/` are hard-wrapped at about 80 columns: read the exact lines before editing, since quoted text in reports is often rewrapped. Local tooling is macOS/BSD (no `timeout`, no `cat -A`).
 
