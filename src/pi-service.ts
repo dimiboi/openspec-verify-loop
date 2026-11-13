@@ -6,7 +6,7 @@ import { captureSettings, hash, modelsFor, parseRunId, parseStart } from './pi-c
 import { acquireOwnership, hasLiveOwner } from './pi-ownership.js';
 import { atomicJson, readJson } from './pi-files.js';
 import { PiRuntime, PiTerminalRunError, readRecords, selectRun, type PiRun } from './pi-runtime.js';
-import { errorMessage, PI_VERSION, projectRoot } from './util.js';
+import { errorMessage, projectRoot, requirePi } from './util.js';
 import { loadScript } from './loop.js';
 
 type Active = {
@@ -68,7 +68,7 @@ export class PiService {
   }
 
   async start(text: string, ctx: ExtensionContext): Promise<PiRun> {
-    if (VERSION !== PI_VERSION) throw new Error(`Pi loop requires Pi ${PI_VERSION}; found ${VERSION}`);
+    requirePi(VERSION);
     const args = parseStart(text);
     const {settings, models} = await captureSettings(this.pi, ctx, this.stateHome);
     const opened = await this.open(ctx.cwd, models);
@@ -96,7 +96,7 @@ export class PiService {
   }
 
   async resume(text: string, ctx: ExtensionContext): Promise<PiRun> {
-    if (VERSION !== PI_VERSION) throw new Error(`Pi loop requires Pi ${PI_VERSION}; found ${VERSION}`);
+    requirePi(VERSION);
     const id = parseRunId(text);
     await this.settle();
     if (this.active) throw new Error(`Run ${this.active.id} is already running or awaiting cleanup; use stop`);

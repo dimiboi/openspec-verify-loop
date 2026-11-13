@@ -313,7 +313,7 @@ or cannot be started, the loop SHALL start no further workers. The host SHALL
 report the failure. A host shutdown or crash that suspends unfinished durable
 work without a terminal worker outcome SHALL leave the run interrupted rather
 than count as a worker failure; such work SHALL resume only on explicit user
-request. Existing bb and OpenCode failure handling SHALL remain unchanged.
+request.
 
 #### Scenario: Fixer session fails
 - **WHEN** a fixer session ends with an error

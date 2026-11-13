@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { OpenCode, type OpenCodeClient, type SessionInfo, type SessionMessageInfo } from '@opencode/client';
 import { Service } from '@opencode/client/service';
+import { OPENCODE_VERSION } from '../../src/util.js';
 import { Attempt, change, checked, checkWorkers, collectPages, command, hashes, help, independentChecks,
   isMain, lifecycle, notices, options, pause, prepareFixture, repository, type Command, type Options } from './common.js';
 
@@ -20,8 +21,8 @@ export async function snapshot(attempt: Attempt, run = command) {
 }
 
 export async function connectExisting(): Promise<OpenCodeClient> {
-  const endpoint = await Service.discover({version: '2.2.5'});
-  assert(endpoint, 'No compatible existing OpenCode 2.2.5 service; start it separately before testing');
+  const endpoint = await Service.discover({version: OPENCODE_VERSION});
+  assert(endpoint, `No compatible existing OpenCode ${OPENCODE_VERSION} service; start it separately before testing`);
   return OpenCode.make({baseUrl: endpoint.url, headers: Service.headers(endpoint)});
 }
 export function modelSettings(model: SessionInfo['model']) {
@@ -115,7 +116,7 @@ export async function runOpenCode(input: Options, deps: {connect?: () => Promise
     attempt.result.fixtureRevision = (await checked('git', ['rev-parse', 'HEAD'], {cwd: attempt.fixture, signal}, run)).trim();
     client = await (deps.connect ?? connectExisting)();
     const info = await client.server.info(request(signal));
-    assert.equal(info.version, '2.2.5', 'Existing host version mismatch');
+    assert.equal(info.version, OPENCODE_VERSION, 'Existing host version mismatch');
     attempt.result.hostInfo = {version: info.version, pid: info.pid};
     const location = {directory: attempt.fixture};
     await client.location.get({location}, request(signal));

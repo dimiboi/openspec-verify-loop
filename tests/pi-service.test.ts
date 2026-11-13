@@ -11,6 +11,7 @@ import { renderRun } from '../src/pi.js';
 import { hash } from '../src/pi-context.js';
 import { realpath } from 'node:fs/promises';
 import { answer, fakeRegistry, model } from './pi-fakes.js';
+import { PI_VERSION, requirePi } from '../src/util.js';
 
 const CLEAN = '## Verification Report: add-export\nAll checks passed.\nVERDICT: CLEAN';
 const pending = async (_context: unknown, opts?: {signal?: AbortSignal}) => new Promise<ReturnType<typeof answer>>(resolve => {
@@ -250,4 +251,10 @@ test('Pi releases ownership if opening its store fails', async t => {
   assert.equal(f.fake.requests.length, 0);
   const other = new PiService(f.pi, () => {}, f.stateHome); t.after(() => other.shutdown());
   await assert.rejects(other.stop('', f.ctx), /No unfinished loop/);
+});
+
+test('Pi start and resume accept the minimum Pi version or later and refuse older or unparseable versions', () => {
+  for (const v of [PI_VERSION, '1.5.3', '1.5.10', '1.6.0', '1.10.0', '2.0.0', '10.0.0', '1.6.0-beta.1']) requirePi(v);
+  assert.throws(() => requirePi('1.5.1'), {message: `Pi loop requires Pi ${PI_VERSION} or later; found 1.5.1`});
+  for (const v of ['1.4.9', '0.0.0', 'abc']) assert.throws(() => requirePi(v), /or later; found/);
 });

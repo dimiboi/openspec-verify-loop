@@ -10,6 +10,7 @@ import { openNodeJsonlStorage } from '@earendil-works/pi-durable/storage/jsonl/n
 import { hash } from '../src/pi-context.js';
 import { PiRecords, readRecords, type PiRun } from '../src/pi-runtime.js';
 import { renderRun } from '../src/pi.js';
+import { PI_VERSION } from '../src/util.js';
 import { command, options, type Options } from './live/common.js';
 import { runPi } from './live/pi.js';
 import type { PiConnection } from './live/pi-rpc.js';
@@ -39,7 +40,7 @@ async function fakePi(t: {after: (fn: () => Promise<void>) => void}, scenario: O
     await save();
   };
   const deps: Parameters<typeof runPi>[1] = {
-    run: async (file, args, opts) => file === 'pi' ? {code: 0, stdout: '1.5.2\n', stderr: ''}
+    run: async (file, args, opts) => file === 'pi' ? {code: 0, stdout: `${PI_VERSION}\n`, stderr: ''}
       : file === 'npm' ? {code: 0, stdout: '', stderr: ''} : command(file, args, opts),
     connect: (attempt, agentDir, args) => {
       connections++; fixture = attempt.fixture;

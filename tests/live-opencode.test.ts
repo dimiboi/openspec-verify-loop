@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { OpenCodeClient } from '@opencode/client';
 import { Attempt, command, checked, type Command, type Options } from './live/common.js';
 import { runOpenCode, snapshot } from './live/opencode.js';
+import { OPENCODE_VERSION } from '../src/util.js';
 
 async function setup(t: {after(fn: () => unknown): void}, scenario: Options['scenario'] = 'fix-to-clean') {
   const root = await mkdtemp(join(tmpdir(), 'live-oc-unit-')); t.after(() => rm(root, {recursive: true, force: true}));
@@ -33,7 +34,7 @@ function fakeHost(settings: {stop?: boolean; lostStart?: boolean; badReport?: bo
   const originMessages = () => [start(), assistant('report-start'),
     ...(hasTerminal() && (!settings.queued || observations > 1) ? [terminal(), assistant('report-end'), idle('idle-end')] : [])];
   const c = {
-    server: {info: async () => ({version: '2.2.5', pid: 1})}, location: {get: async () => ({})},
+    server: {info: async () => ({version: OPENCODE_VERSION, pid: 1})}, location: {get: async () => ({})},
     plugin: {list: async () => ({data: settings.emptyCatalogue && catalogues++ === 0 ? [] : [{id: 'openspec.verify-loop', source: {type: 'package', target: join(currentFixture(), '../plugin')}, state: {status: 'active'}}]})},
     command: {list: async () => ({data: [{name: 'opsx-verify-loop'}, {name: 'opsx-verify-loop-stop'}]})},
     skill: {list: async () => ({data: [{id: 'openspec-verify-loop'}, ...(settings.missingProcedure ? [] : [{id: 'openspec-verify-change', path: join(directory || currentFixture(), '.agents/skills/openspec-verify-change/SKILL.md')}])]})},

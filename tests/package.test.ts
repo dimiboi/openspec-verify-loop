@@ -7,6 +7,14 @@ import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { OPENCODE_VERSION, PI_VERSION } from '../src/util.js';
+
+test('package pins match the host version constants', async () => {
+  const pkg = JSON.parse(await readFile('package.json', 'utf8'));
+  assert.equal(pkg.dependencies['@opencode/client'], OPENCODE_VERSION);
+  assert.equal(pkg.dependencies['@opencode/plugin'], OPENCODE_VERSION);
+  assert.equal(pkg.devDependencies['@earendil-works/pi-coding-agent'], PI_VERSION);
+});
 
 const git = (cwd: string, ...args: string[]) => promisify(execFile)('git', args, {cwd});
 

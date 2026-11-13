@@ -8,6 +8,7 @@ import { MANAGEMENT_TOOL } from '../src/workers.js';
 import { LoopService } from '../src/service.js';
 import { RunManager } from '../src/manager.js';
 import { registerTool } from '../src/tools.js';
+import { OPENCODE_VERSION } from '../src/util.js';
 import { fakeClient, until, type FakeOptions } from './fake-client.js';
 
 const invoking = {providerID: 'fake', id: 'test', variant: 'high'};
@@ -24,7 +25,7 @@ function fakeHost(options: unknown = {}) {
     return {dispose: async () => { if (!disposed) {disposed = true; disposals++;} }};
   };
   const ctx = {
-    app: {version: '2.2.5'}, location: {directory: '/unrelated/plugin-instance'}, options,
+    app: {version: OPENCODE_VERSION}, location: {directory: '/unrelated/plugin-instance'}, options,
     session: {
       get: async ({sessionID}: {sessionID: string}) => ({id: sessionID, location: {directory: process.cwd()},
         model: switched, metadata: sessionID === 'worker' ? {openspecVerifyLoop: 'run_fake'} : {}}),
@@ -75,10 +76,10 @@ test('plugin options accept only server and maxRounds', async () => {
   }
 });
 
-test('the plugin refuses to load on any OpenCode version other than 2.2.5', async () => {
+test(`the plugin refuses to load on any OpenCode version other than ${OPENCODE_VERSION}`, async () => {
   const host = fakeHost();
-  const ctx = {...host.ctx, app: {version: '2.2.4'}} as unknown as Plugin.Context;
-  await assert.rejects(setupPlugin(ctx), /requires OpenCode 2\.2\.5/);
+  const ctx = {...host.ctx, app: {version: '0.0.0'}} as unknown as Plugin.Context;
+  await assert.rejects(setupPlugin(ctx), (error: Error) => error.message.includes(`requires OpenCode ${OPENCODE_VERSION}`));
   assert.equal(host.commands.length + host.tools.length + host.skills.length, 0, 'nothing is registered');
 });
 

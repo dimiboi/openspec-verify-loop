@@ -12,7 +12,10 @@ for (const script of ['build', 'prepare', 'prepack', 'preinstall', 'install', 'p
 for (const field of ['name', 'description', 'branding', 'server']) assert(pkg.bb?.[field], `bb manifest needs ${field}`);
 assert.equal(pkg.bb.server, './bb/server.ts');
 assert.deepEqual(pkg.pi, {extensions: ['./dist/pi.js'], skills: []});
-assert.equal(pkg.engines.node, '>=22.19.0');
+// shortcut: reads the first entry of a one-line `node: ['x', ...]` matrix; update the pattern if the matrix is reshaped.
+const floor = /^\s*node:\s*\[\s*'([^']+)'/m.exec(await readFile('.github/workflows/ci.yml', 'utf8'))?.[1];
+assert(floor, 'CI must list a node: matrix');
+assert.equal(pkg.engines.node, `>=${floor}`, 'engines.node must match the lowest CI Node version');
 for (const name of ['@earendil-works/pi-coding-agent', '@earendil-works/pi-ai']) {
   assert(!pkg.dependencies[name], `${name} is provided by Pi`);
   assert.equal(pkg.peerDependenciesMeta[name].optional, true);

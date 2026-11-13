@@ -7,6 +7,7 @@ import { PiRuntime, readRecords, selectRun, type PiRun } from '../../src/pi-runt
 import { hash } from '../../src/pi-context.js';
 import { acquireOwnership, hasLiveOwner } from '../../src/pi-ownership.js';
 import { loadScript } from '../../src/loop.js';
+import { requirePi } from '../../src/util.js';
 import { PiRpc, type PiConnection } from './pi-rpc.js';
 import { snapshot } from './opencode.js';
 import { Attempt, change, checked, checkWorkers, collectPages, command, independentChecks, isMain, lifecycle,
@@ -119,7 +120,7 @@ export async function runPi(input: Options, dependencies: Dependencies = {}) {
     await mkdir(agentDir, {recursive: true, mode: 0o700});
     const plugin = await snapshot(attempt, run);
     const version = (await checked('pi', ['--version'], {cwd: attempt.fixture, env: {PI_CODING_AGENT_DIR: agentDir}, signal}, run)).trim();
-    assert.equal(version, '1.5.2', `Pi 1.5.2 required; found ${version}`);
+    requirePi(version);
     const durable = JSON.parse(await readFile(join(plugin, 'package.json'), 'utf8')).dependencies['@earendil-works/pi-durable'];
     attempt.result.versions = {pi: version, durable};
     args = ['--no-extensions', '--no-mcp', '--no-skills', '--no-prompt-templates', '--approve',

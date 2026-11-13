@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs, promisify } from 'node:util';
+import { OPENCODE_VERSION } from '../../src/util.js';
 
 export const repository = fileURLToPath(new URL('../../', import.meta.url));
 export const change = 'add-greeting';
@@ -20,7 +21,7 @@ export const help = (host: Host) => `Live ${host} checks (explicit model calls; 
 ${host === 'bb' ? '--permission-mode auto|full [--reasoning-level medium]' : host === 'pi' ? '[--reasoning-level medium] [--provider-extension /path/to/provider]' : '[--variant default]'}
 [--timeout 3600] [--cleanup-timeout 60] [--output /path/outside/source]
 Timeouts are seconds. Evidence, fixtures and host sessions are retained.
-${host === 'pi' ? 'Pi uses isolated fixture state; provide credentials in the environment or a provider extension.' : 'Install the tested checkout explicitly on bb; OpenCode uses an existing 2.2.5 service.'}
+${host === 'pi' ? 'Pi uses isolated fixture state; provide credentials in the environment or a provider extension.' : `Install the tested checkout explicitly on bb; OpenCode uses an existing ${OPENCODE_VERSION} service.`}
 `;
 
 export function options(host: Host, args: string[]): Options | undefined {

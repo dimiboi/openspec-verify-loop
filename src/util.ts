@@ -6,6 +6,13 @@ import { promisify } from 'node:util';
 
 export const OPENCODE_VERSION = '2.2.5';
 export const PI_VERSION = '1.5.2';
+// Pre-release suffixes are ignored; a version that does not parse counts as older.
+export function requirePi(found: string) {
+  const parts = (v: string) => /^(\d+)\.(\d+)\.(\d+)/.exec(v)?.slice(1).map(Number);
+  const have = parts(found), want = parts(PI_VERSION)!;
+  const cmp = have ? have.map((n, i) => n - want[i]!).find(d => d !== 0) ?? 0 : -1;
+  if (cmp < 0) throw new Error(`Pi loop requires Pi ${PI_VERSION} or later; found ${found}`);
+}
 export class LoopError extends Error {
   constructor(public outcome: string, message: string) { super(message); }
 }

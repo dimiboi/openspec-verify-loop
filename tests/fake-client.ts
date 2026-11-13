@@ -1,5 +1,6 @@
 import type { OpenCodeClient } from '@opencode/client';
 import { OpenCodeAdapter } from '../src/opencode.js';
+import { OPENCODE_VERSION } from '../src/util.js';
 
 export type FakeOptions = {
   replies?: string[];
@@ -29,7 +30,7 @@ export function fakeClient(options: FakeOptions = {}) {
   };
   const client = {
     location: {get: async () => ({})},
-    server: {info: async () => ({version: '2.2.5', pid: process.pid})},
+    server: {info: async () => ({version: OPENCODE_VERSION, pid: process.pid})},
     skill: {list: async () => ({data: options.skills ?? [{id: 'openspec-verify-change', name: 'openspec-verify-change', path: '/p/.opencode/skills/openspec-verify-change/SKILL.md'}]})},
     model: {list: async () => ({data: options.models ?? [{id: 'test', providerID: 'fake', enabled: true, variants: [{id: 'high'}]}]})},
     session: {

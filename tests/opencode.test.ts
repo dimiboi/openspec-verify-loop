@@ -6,6 +6,7 @@ import { Service } from '@opencode/client/service';
 import { fakeClient } from './fake-client.js';
 import { MANAGEMENT_TOOL, workerPermissions } from '../src/workers.js';
 import { OpenCodeAdapter, assertHostingServer, connectToHost, resolveOriginModel, type Assignment } from '../src/opencode.js';
+import { OPENCODE_VERSION } from '../src/util.js';
 
 const a: Assignment={sessionId:'ses_a',inputId:'msg_a',runId:'run_a',role:'verifier',round:1,agent:'verifier',project:'/tmp/project',
   model:{providerID:'fake',id:'test'},permissions:workerPermissions('verifier'),prompt:'verify'};
@@ -54,7 +55,7 @@ test('native commands inherit session selections or session history without gues
 });
 test('catalog discovery needs neither agent discovery nor a server default model', async () => {
   const client = {
-    location: {get: async () => ({})}, server: {info: async () => ({version: '2.2.5'})},
+    location: {get: async () => ({})}, server: {info: async () => ({version: OPENCODE_VERSION})},
     agent: {list: async () => {throw new Error('Agent discovery unavailable');}}, skill: {list: async () => ({data: []})},
     model: {
       list: async () => ({data: [{id: 'local', providerID: 'lmstudio', enabled: true, variants: [{id: 'default'}]}]}),
@@ -114,7 +115,7 @@ test('message pagination follows cursors without incompatible order parameters',
   assert.equal(collected.length,2);assert.equal(inputs.length,2);
 });
 test('a configured endpoint with another scheme, credentials, query or fragment is refused before the token is sent', async () => {
-  const ctx = {app: {version: '2.2.5'}, session: {get: async () => ({id: 'origin'})}} as unknown as Plugin.Context;
+  const ctx = {app: {version: OPENCODE_VERSION}, session: {get: async () => ({id: 'origin'})}} as unknown as Plugin.Context;
   for (const server of ['ftp://127.0.0.1:4096', 'http://user:pw@127.0.0.1:4096', 'http://127.0.0.1:4096/?a=1', 'http://127.0.0.1:4096/#x']) {
     await assert.rejects(connectToHost(ctx, 'origin', server), /must be an HTTP\(S\) URL without credentials/, server);
   }
@@ -123,26 +124,26 @@ test('without a server option, no discoverable service blocks the start and name
   const discover = Service.discover;
   t.after(() => { Service.discover = discover; });
   Service.discover = (async () => undefined) as typeof Service.discover;
-  const ctx = {app: {version: '2.2.5'}, session: {get: async () => ({id: 'origin'})}} as unknown as Plugin.Context;
+  const ctx = {app: {version: OPENCODE_VERSION}, session: {get: async () => ({id: 'origin'})}} as unknown as Plugin.Context;
   await assert.rejects(connectToHost(ctx, 'origin'), (error: any) => error.outcome === 'blocked' && /server option/.test(error.message));
 });
 test('a catalogue from a server reporting another version is refused with both versions', async () => {
   const {adapter} = fakeClient();
-  (adapter.client as any).server.info = async () => ({version: '2.3.0', pid: process.pid});
-  await assert.rejects(adapter.catalog('/p'), (error: any) => error.outcome === 'blocked' && /2\.2\.5 is required; server reports 2\.3\.0/.test(error.message));
+  (adapter.client as any).server.info = async () => ({version: '0.0.0', pid: process.pid});
+  await assert.rejects(adapter.catalog('/p'), (error: any) => error.outcome === 'blocked' && error.message.includes(`${OPENCODE_VERSION} is required; server reports 0.0.0`));
 });
 test('recovery client must match the plugin process and originating native session', async () => {
   const origin = {id: 'origin', time: {created: 1}, location: {directory: '/consumer'}, metadata: {key: 'value'}} as unknown as SessionInfo;
   let pid = process.pid, remote: object = {};
-  const client = {server: {info: async () => ({version: '2.2.5', pid})},
+  const client = {server: {info: async () => ({version: OPENCODE_VERSION, pid})},
     session: {get: async () => ({...origin, ...remote})}} as unknown as OpenCodeClient;
-  await assertHostingServer('2.2.5', origin, client);
+  await assertHostingServer(OPENCODE_VERSION, origin, client);
   pid++;
-  await assert.rejects(assertHostingServer('2.2.5', origin, client), /not this plugin hosting server/);
+  await assert.rejects(assertHostingServer(OPENCODE_VERSION, origin, client), /not this plugin hosting server/);
   pid = process.pid;
   for (const change of [{location: {directory: '/other'}}, {time: {created: 2}}, {metadata: {key: 'other'}}, {metadata: undefined}]) {
     remote = change;
-    await assert.rejects(assertHostingServer('2.2.5', origin, client), /not this plugin hosting server/, JSON.stringify(change));
+    await assert.rejects(assertHostingServer(OPENCODE_VERSION, origin, client), /not this plugin hosting server/, JSON.stringify(change));
   }
 });
 test('worker creation persists and verifies the full per-session permission policy', async () => {

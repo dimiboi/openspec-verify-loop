@@ -20,6 +20,12 @@ import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 var PI_VERSION = "1.5.2";
+function requirePi(found) {
+  const parts = (v) => /^(\d+)\.(\d+)\.(\d+)/.exec(v)?.slice(1).map(Number);
+  const have = parts(found), want = parts(PI_VERSION);
+  const cmp = have ? have.map((n, i) => n - want[i]).find((d) => d !== 0) ?? 0 : -1;
+  if (cmp < 0) throw new Error(`Pi loop requires Pi ${PI_VERSION} or later; found ${found}`);
+}
 var LoopError = class extends Error {
   constructor(outcome, message) {
     super(message);
@@ -756,7 +762,7 @@ var PiService = class {
     }
   }
   async start(text, ctx) {
-    if (VERSION !== PI_VERSION) throw new Error(`Pi loop requires Pi ${PI_VERSION}; found ${VERSION}`);
+    requirePi(VERSION);
     const args = parseStart(text);
     const { settings, models } = await captureSettings(this.pi, ctx, this.stateHome);
     const opened = await this.open(ctx.cwd, models);
@@ -789,7 +795,7 @@ var PiService = class {
     return run;
   }
   async resume(text, ctx) {
-    if (VERSION !== PI_VERSION) throw new Error(`Pi loop requires Pi ${PI_VERSION}; found ${VERSION}`);
+    requirePi(VERSION);
     const id = parseRunId(text);
     await this.settle();
     if (this.active) throw new Error(`Run ${this.active.id} is already running or awaiting cleanup; use stop`);
