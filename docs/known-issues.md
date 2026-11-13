@@ -2,8 +2,10 @@
 
 Current bugs and behaviours in bb, OpenCode, Pi Durable and OpenSpec that the
 plugin or its users have to work around. Each entry says what happens, where it
-is tracked, and what the workaround is. Remove an entry when the upstream fix
-ships and the workaround is gone.
+is tracked, and what the workaround is. When a test fails without a workaround,
+the entry names it under **Check:**; remove the workaround only after that check
+passes without it. Remove an entry when the upstream fix ships and the
+workaround is gone.
 
 ## bb
 
@@ -119,6 +121,9 @@ bb live driver calls both as the fixture project's starting thread.
   failed a report poll in `tests/pi-service.test.ts` during cleanup.
 - **Workaround:** the Pi report retries an open that fails with a `not_found`
   cause, up to 5 attempts (`readRecords` in `src/pi-runtime.ts`).
+- **Check:** remove the retry in `readRecords` and run
+  `npx tsx --test tests/durable-readonly.test.ts` several times; it must pass
+  and log no races.
 - **Tracked:** [earendil-works/pi#11994](https://github.com/earendil-works/pi/issues/11994)
   (auto-closed pending maintainer review), with a two-line fix in
   `NodeExecutionEnv.listDir` proposed. Still open at the 1.5.2 pin: 1.5.2 skips

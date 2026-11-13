@@ -1,9 +1,22 @@
 # Working in this repository
 
-- Use Node.js >=22.19 and `npm ci`. Run `npm run check` for code changes: types, build, deterministic tests, and package validation. Documentation-only edits do not need the suite.
+- Use Node.js >=22.19 and `npm ci`. Run `npm run check` for code changes: types, build, deterministic tests, and package validation. Edits to docs, specs or `.github/workflows/ci.yml` do not need the suite; run `openspec validate --specs` after editing a spec.
+- If `npm ls` reports missing packages, run `npm ci`; a read-only task reports it instead of working around it.
 - Run `npm ci` and `npm run check` with the same npm cache (the same `npm_config_cache`, or both on the default): the offline snapshot test installs production dependencies from that cache, and an `ENOTCACHED` failure in `tests/live-opencode.test.ts` means the caches differ.
 - Edit `src/`; `npm run bundle` generates the committed `dist/index.js`, `dist/pi.js` and `dist/pi-supervisor.js`. Keep host SDK/runtime dependencies external to the bundle.
 - Resolve packaged resources from `import.meta.url` and consuming project paths from the invoking session's location. The plugin must never start, replace, or stop an OpenCode service.
+- README and `docs/` are hard-wrapped at about 80 columns: read the exact lines before editing, since quoted text in reports is often rewrapped. Local tooling is macOS/BSD (no `timeout`, no `cat -A`).
+
+## Where things live
+
+- Loop: `skills/openspec-verify-loop/verify-loop.js`; `src/loop.ts` runs it in a bb-like sandbox for OpenCode and Pi.
+- bb: `bb/server.ts` (server entry) and `skills/openspec-verify-loop/SKILL.md`.
+- OpenCode: `src/plugin.ts` (entry, version check), `src/service.ts` and `src/manager.ts` (runs), `src/runner.ts` and `src/opencode.ts` (workers), `src/tools.ts` and `src/commands.ts` (tool and slash commands), `src/workers.ts` (worker permissions), `opencode/SKILL.md`.
+- Pi: `src/pi.ts` (entry, commands), `src/pi-service.ts` (version check, start, resume, stop), `src/pi-runtime.ts` (Durable store and reports, including the read-only retry), `src/pi-ownership.ts` (checkout lock), `src/pi-process.ts` and `src/pi-supervisor.ts` (worker processes), `src/pi-context.ts` (provider and auth), `src/pi-files.ts` (state files).
+- Shared: `src/util.ts` (host version constants, errors) and `src/config.ts` (options).
+- Build: `scripts/bundle.mjs` builds `dist/`; `scripts/validate-plugin.mjs` validates the package.
+- Tests: `tests/*.test.ts` are deterministic; `tests/live/*` are the opt-in drivers behind `npm run test:live:{bb,opencode,pi}`.
+- Docs: `docs/verification.md` (procedure, then dated records from `## Recorded results` on), `docs/pi-*-<date>.md` (dated run notes), `docs/known-issues.md`, `docs/future-improvements.md`, and the specs in `openspec/specs/`. Dated records describe the past: add a new record, never rewrite an old one to match the current state.
 
 ## Loop invariants
 
@@ -21,3 +34,10 @@ The automated suite uses fake host/model adapters; it must not call models or st
 Possible additions wait for an observed trigger; they are listed in [docs/future-improvements.md](docs/future-improvements.md). Do not build one before its trigger is seen.
 
 Upstream bb, OpenCode, Pi Durable and OpenSpec bugs that shape the plugin, and their workarounds, are listed in [docs/known-issues.md](docs/known-issues.md). Check it before changing a workaround, and update it when an upstream fix ships.
+
+## Changing hosts or host versions
+
+- Host set: update the `package.json` description, the README intro, the `## Purpose` of each `openspec/specs/*/spec.md`, the known-issues line above and the `docs/known-issues.md` intro. Then run `git grep -nE 'both hosts|two hosts|bb (and|or) OpenCode' -- . ':!openspec/changes'` and judge each hit; some are deliberate scope statements, such as `openspec/specs/pi-integration/spec.md:18`.
+- Pi version: change `PI_VERSION` in `src/util.ts` and the three `@earendil-works/*` pins in `package.json`, then run `npm install` for the lockfile. Then `git grep -n '<old version>' -- . ':!openspec/changes'` finds the rest: the live driver and its fake `pi --version`, README `## Pi`, "Opt-in Pi checks" in `docs/verification.md`, and comments; leave dated records alone. Re-run the **Check:** of each Pi Durable entry in `docs/known-issues.md`, then `npm run check`, which rebuilds `dist/`.
+- OpenCode version: change `OPENCODE_VERSION` in `src/util.ts` and the `@opencode/*` pins in `package.json`, then run `npm install`. Then `git grep -n '<old version>' -- . ':!openspec/changes'` finds the rest: test fakes, the live driver, README, the OpenCode procedure in `docs/verification.md`, comments and the invariants above; leave dated records alone. Re-run any OpenCode **Check:**, then `npm run check`.
+- Node floor: `engines.node` (asserted by `scripts/validate-plugin.mjs`), the lowest version in the `.github/workflows/ci.yml` matrix, and the Node versions stated here and in README change together.
