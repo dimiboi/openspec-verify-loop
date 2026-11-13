@@ -755,7 +755,7 @@ var PiService = class {
     }
   }
   async start(text, ctx) {
-    if (VERSION !== "1.5.1") throw new Error(`Pi loop requires Pi 1.5.1; found ${VERSION}`);
+    if (VERSION !== "1.5.2") throw new Error(`Pi loop requires Pi 1.5.2; found ${VERSION}`);
     const args = parseStart(text);
     const { settings, models } = await captureSettings(this.pi, ctx, this.stateHome);
     const opened = await this.open(ctx.cwd, models);
@@ -788,7 +788,7 @@ var PiService = class {
     return run;
   }
   async resume(text, ctx) {
-    if (VERSION !== "1.5.1") throw new Error(`Pi loop requires Pi 1.5.1; found ${VERSION}`);
+    if (VERSION !== "1.5.2") throw new Error(`Pi loop requires Pi 1.5.2; found ${VERSION}`);
     const id = parseRunId(text);
     await this.settle();
     if (this.active) throw new Error(`Run ${this.active.id} is already running or awaiting cleanup; use stop`);

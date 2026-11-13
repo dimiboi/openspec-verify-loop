@@ -63,7 +63,7 @@ export async function readRecords(directory: string): Promise<PiBook & {committe
   for (let attempt = 1; ; attempt++) {
     try { storage = await openNodeJsonlStorage(store, context, {readOnly: true}); break; }
     catch (error) {
-      // Durable 1.5.1 does not retry an open whose listing raced the writer removing a reclaimed file.
+      // Durable 1.5.1 and 1.5.2 do not retry an open whose listing raced the writer removing a reclaimed file.
       if (attempt === 5 || (error as {cause?: {code?: string}}).cause?.code !== 'not_found') throw error;
     }
   }

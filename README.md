@@ -78,9 +78,10 @@ Workflows preview and history keep every round's report.
 
 ## Pi
 
-Requires **Pi 1.5.1** and Node.js **>=22.19**. The package pins Pi Durable
-and Chord **1.5.1**; host SDK packages stay external. Native live compatibility
-checks are recorded in [verification](docs/verification.md).
+Requires **Pi 1.5.2** and Node.js **>=22.19**. The package pins Pi Durable
+and Chord **1.5.2**; host SDK packages stay external. The recorded native live
+compatibility checks ran on Pi 1.5.0 and 1.5.1, so a 1.5.2 check is still
+outstanding; see [verification](docs/verification.md).
 
 Install the package without a build step:
 

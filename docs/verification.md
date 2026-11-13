@@ -31,7 +31,7 @@ fixture checks, stop races, duplicate admissions and bounded failure cleanup.
 
 ## Opt-in Pi checks
 
-Requires Node >=22.19, Pi 1.5.1 on PATH, the installed verify procedure,
+Requires Node >=22.19, Pi 1.5.2 on PATH, the installed verify procedure,
 and an explicitly selected available provider/model. The driver uses isolated
 agent state and package resources, so credentials must be available through
 the environment or an explicitly supplied provider extension. It installs no

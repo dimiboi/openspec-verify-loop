@@ -121,8 +121,15 @@ bb live driver calls both as the fixture project's starting thread.
   cause, up to 5 attempts (`readRecords` in `src/pi-runtime.ts`).
 - **Tracked:** [earendil-works/pi#11994](https://github.com/earendil-works/pi/issues/11994)
   (auto-closed pending maintainer review), with a two-line fix in
-  `NodeExecutionEnv.listDir` proposed. Drop the retry once a release skips
-  entries that vanish during the listing.
+  `NodeExecutionEnv.listDir` proposed. Still open at the 1.5.2 pin: 1.5.2 skips
+  entries that vanish between the listing and the `lstat` in `openDirReader`'s
+  paged read, but `NodeExecutionEnv.listDir`, which the read-only open's recovery
+  uses, still returns the error
+  (`node_modules/@earendil-works/pi-durable/dist/env/node.js:1050-1072`).
+  Reproduced on 2026-11-13 with Durable 1.5.2: `tests/durable-readonly.test.ts`
+  logged 5 races in 2,404 fresh opens, and failed outright when the retry was
+  removed. Drop the retry once `listDir` skips entries that vanish during the
+  listing.
 
 ## OpenSpec
 

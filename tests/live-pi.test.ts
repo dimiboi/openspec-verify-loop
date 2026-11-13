@@ -39,7 +39,7 @@ async function fakePi(t: {after: (fn: () => Promise<void>) => void}, scenario: O
     await save();
   };
   const deps: Parameters<typeof runPi>[1] = {
-    run: async (file, args, opts) => file === 'pi' ? {code: 0, stdout: '1.5.1\n', stderr: ''}
+    run: async (file, args, opts) => file === 'pi' ? {code: 0, stdout: '1.5.2\n', stderr: ''}
       : file === 'npm' ? {code: 0, stdout: '', stderr: ''} : command(file, args, opts),
     connect: (attempt, agentDir, args) => {
       connections++; fixture = attempt.fixture;

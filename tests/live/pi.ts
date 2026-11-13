@@ -119,7 +119,7 @@ export async function runPi(input: Options, dependencies: Dependencies = {}) {
     await mkdir(agentDir, {recursive: true, mode: 0o700});
     const plugin = await snapshot(attempt, run);
     const version = (await checked('pi', ['--version'], {cwd: attempt.fixture, env: {PI_CODING_AGENT_DIR: agentDir}, signal}, run)).trim();
-    assert.equal(version, '1.5.1', `Pi 1.5.1 required; found ${version}`);
+    assert.equal(version, '1.5.2', `Pi 1.5.2 required; found ${version}`);
     const durable = JSON.parse(await readFile(join(plugin, 'package.json'), 'utf8')).dependencies['@earendil-works/pi-durable'];
     attempt.result.versions = {pi: version, durable};
     args = ['--no-extensions', '--no-mcp', '--no-skills', '--no-prompt-templates', '--approve',

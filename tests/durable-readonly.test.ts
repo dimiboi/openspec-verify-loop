@@ -78,7 +78,7 @@ test('Durable read-only handles hold their open state; fresh opens see a live wr
       const n = await read(store);
       assert(n >= floor && n >= last, `fresh open saw ${n} after ${floor} was committed`); last = n; reads++;
     } catch (error) {
-      // Durable 1.5.1 does not retry a read-only open whose directory listing raced a writer removing a file.
+      // Durable 1.5.1 and 1.5.2 do not retry a read-only open whose directory listing raced a writer removing a file.
       if ((error as {cause?: {code?: string}}).cause?.code !== 'not_found') throw error;
       raced++;
     }
